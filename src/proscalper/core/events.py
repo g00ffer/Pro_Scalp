@@ -188,24 +188,25 @@ class SignalRejection(msgspec.Struct):
 
 class OrderEvent(msgspec.Struct):
     """Событие ордера (создание, обновление, отмена)."""
+    # Обязательные поля (без дефолтных значений)
     ts_ns: int
     symbol: str
     client_order_id: str
-    exchange_order_id: Optional[str] = None
     side: OrderSide
     order_type: OrderType
-    price: Optional[float] = None
     quantity: float
+    
+    # Опциональные поля (с дефолтными значениями)
+    exchange_order_id: Optional[str] = None
+    price: Optional[float] = None
     time_in_force: TimeInForce = TimeInForce.GTC
     reduce_only: bool = False
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: float = 0.0
     avg_fill_price: float = 0.0
-    
-    # Для связанных ордеров
     signal_id: Optional[str] = None
     parent_order_id: Optional[str] = None
-    leg_type: str = ""  # "entry", "stop", "take_profit"
+    leg_type: str = ""
 
 
 class FillEvent(msgspec.Struct):

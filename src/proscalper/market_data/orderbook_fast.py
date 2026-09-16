@@ -60,6 +60,7 @@ class FastOrderBook:
 
         self._last_update_id = 0
         self._pending_batches: List[BookDeltaBatchEvent] = []
+        self._first_event_after_snapshot = False
 
         self._last_update_ts_ns = 0
         self._last_local_ts_ns = 0
@@ -160,6 +161,7 @@ class FastOrderBook:
         self._pending_batches.clear()
         self._last_update_ts_ns = 0
         self._last_local_ts_ns = 0
+        self._first_event_after_snapshot = False
 
     def apply_snapshot(self, snapshot: BookSnapshotEvent) -> bool:
         """
@@ -194,6 +196,7 @@ class FastOrderBook:
         self._last_update_ts_ns = snapshot.ts_exchange_ns
         self._last_local_ts_ns = snapshot.ts_local_ns
         self._initialized = True
+        self._first_event_after_snapshot = True
 
         # Применяем буферизированные дельты.
         for delta_batch in pending:
@@ -313,22 +316,33 @@ class FastOrderBook:
         """
         Проверка последовательности Binance Futures depthUpdate.
 
-        После снапшота первое событие может пересекаться:
-            U <= lastUpdateId + 1 <= u
-
-        Дальше ожидаем:
-            pu == previous lastUpdateId
+        Правила Binance (официальная документация):
+        1. Игнорируем события, где u < lastUpdateId (уже в snapshot)
+        2. Первое событие после snapshot должно содержать lastUpdateId+1:
+        U <= lastUpdateId+1 <= u
+        3. Все последующие: pu (previous update id) == previous u
         """
-        if delta_batch.prev_update_id == self._last_update_id:
+        # Игнорируем старые события (они уже учтены в snapshot)
+        if delta_batch.last_update_id < self._last_update_id:
             return True
 
-        if (
-            delta_batch.first_update_id <= self._last_update_id + 1
-            <= delta_batch.last_update_id
-        ):
-            return True
+        if self._first_event_after_snapshot:
+            # Первое событие после snapshot: ищем то, которое содержит lastUpdateId+1
+            target_id = self._last_update_id + 1
+            
+            if (delta_batch.first_update_id <= target_id <= delta_batch.last_update_id):
+                self._first_event_after_snapshot = False
+                return True
+            
+            # Если это событие всё ещё старое (u < target), игнорируем
+            if delta_batch.last_update_id < target_id:
+                return True
+            
+            # Иначе — это событие новее, чем нужно, значит пропустили
+            return False
 
-        return False
+        # Для последующих событий: pu == previous u
+        return delta_batch.prev_update_id == self._last_update_id
 
     def _update_level(
         self,
@@ -360,3 +374,10 @@ class FastOrderBook:
     def _mark_out_of_sync(self, reason: str) -> None:
         self._out_of_sync = True
         self._out_of_sync_reason = reason
+
+    def mark_snapshot_requested(self) -> None:
+        """
+        Пометить, что snapshot запрошен.
+        Вызывается ДО получения snapshot, чтобы буферизировать события.
+        """
+        self._first_event_after_snapshot = True
