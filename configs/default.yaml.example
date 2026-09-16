@@ -1,0 +1,30 @@
+# Шаблон конфигурации. Скопируйте в configs/default.yaml и настройте.
+# cp configs/default.yaml.example configs/default.yaml
+
+collector:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  data_dir: ./data/binance_futures
+  depth_update_speed: 100ms
+  snapshot_limit: 1000
+  batch_size: 1000
+  flush_interval_ms: 200
+  queue_size: 50000
+
+exchange:
+  name: binance_futures
+  # Ключи хранятся в .env или secrets/api_keys.yaml
+  # НЕ прописывайте их здесь!
+
+levels:
+  timeframe: 5m
+  history_hours: 24
+  fractal_left_bars: 2
+  fractal_right_bars: 2
+  cluster_distance_ticks: 10
+
+risk:
+  risk_per_trade_pct: 0.25
+  max_daily_loss_pct: 2.0
+  max_positions: 1

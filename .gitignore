@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Локальные конфиги и секреты
+.env
+.env.local
+.env.*.local
+secrets/
+configs/local/
+*.local.yaml
+
+# Данные (слишком большие для GitHub)
+data/
+*.jsonl
+*.parquet
+*.arrow
+
+# Логи
+logs/
+*.log
+
+# Тесты и кэш
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Временные файлы
+*.tmp
+*.bak
+*.cache
