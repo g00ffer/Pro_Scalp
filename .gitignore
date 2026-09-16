@@ -1,70 +1,31 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environment
-.venv/
-venv/
-ENV/
-env/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# Локальные конфиги и секреты
+# СЕКРЕТЫ И КОНФИГИ (НИКОГДА НЕ ПУШИМ)
 .env
-.env.local
-.env.*.local
+.env.*
 secrets/
 configs/local/
-*.local.yaml
+configs/default.yaml
 
-# Данные (слишком большие для GitHub)
+# ДАННЫЕ И ЛОГИ (ИНАЧЕ ЗАПУШИМ ГИГАБАЙТЫ)
 data/
+logs/
 *.jsonl
 *.parquet
 *.arrow
 
-# Логи
-logs/
-*.log
+# ВИРТУАЛЬНОЕ ОКРУЖЕНИЕ (ТЫСЯЧИ ФАЙЛОВ)
+.venv/
+venv/
+ENV/
 
-# Тесты и кэш
+# PYTHON И IDE
+__pycache__/
+*.pyc
+*.pyo
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
 .pytest_cache/
-.coverage
-htmlcov/
 .mypy_cache/
 .ruff_cache/
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# Временные файлы
-*.tmp
-*.bak
-*.cache
