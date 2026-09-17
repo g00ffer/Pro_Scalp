@@ -48,6 +48,113 @@ class BinanceFuturesRestClient:
             await self._client.aclose()
             self._client = None
 
+    # ============================================
+    # Внутренний HTTP-метод с retry
+    # ============================================
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        max_retries: int = 3,
+    ) -> Any:
+        """
+        Универсальный HTTP-запрос с повторами.
+
+        Используется всеми публичными методами класса.
+        Обрабатывает временные сетевые ошибки и rate limits (429).
+        Не повторяет клиентские ошибки (400, 401, 403, 404).
+
+        Возвращает:
+            Распарсенный JSON ответ.
+
+        Выбрасывает:
+            RuntimeError: если все попытки исчерпаны.
+        """
+        import asyncio
+
+        url = f"{self._base_url}{path}"
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(max_retries):
+            try:
+                request_kwargs: Dict[str, Any] = {
+                    "timeout": 30.0,
+                }
+                if params is not None:
+                    request_kwargs["params"] = params
+                if json_body is not None:
+                    request_kwargs["json"] = json_body
+                if headers is not None:
+                    request_kwargs["headers"] = headers
+
+                response = await self._client.request(
+                    method.upper(),
+                    url,
+                    **request_kwargs,
+                )
+
+                # Успех
+                if response.status_code == 200:
+                    return response.json()
+
+                # Rate limit — ждём и повторяем
+                if response.status_code == 429:
+                    retry_after = int(
+                        response.headers.get("Retry-After", 2 ** attempt)
+                    )
+                    wait_sec = min(retry_after, 30)
+                    print(
+                        f"[REST] Rate limit (429), "
+                        f"waiting {wait_sec}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+                # Серверные ошибки — повторяем
+                if response.status_code >= 500:
+                    wait_sec = min(2 ** attempt, 10)
+                    print(
+                        f"[REST] Server error {response.status_code}, "
+                        f"retry in {wait_sec}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+                # Клиентские ошибки — сразу падаем
+                error_text = response.text[:500]
+                raise RuntimeError(
+                    f"HTTP {response.status_code} "
+                    f"for {method.upper()} {path}: {error_text}"
+                )
+
+            except RuntimeError:
+                # Клиентская ошибка — не повторяем
+                raise
+
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    wait_sec = min(2 ** attempt, 5)
+                    print(
+                        f"[REST] Network error: {exc}, "
+                        f"retry in {wait_sec}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(wait_sec)
+                else:
+                    break
+
+        raise RuntimeError(
+            f"Request failed after {max_retries} attempts: "
+            f"{method.upper()} {path}: {last_exc}"
+        )
+
     async def get_server_time(self) -> int:
         """
         Возвращает время сервера в миллисекундах.
