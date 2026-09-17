@@ -45,7 +45,7 @@ class StopType(Enum):
 
 
 @dataclass
-class StopConfig:
+class StopsConfig:
     """
     Конфигурация стопов.
     
