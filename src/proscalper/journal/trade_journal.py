@@ -106,8 +106,8 @@ class TradeJournalEntry(msgspec.Struct):
     r_multiple: float = 0.0
     
     # --- Причины (из journal/reasons.py) ---
-    entry_reasons: List[str] = field(default_factory=list)
-    exit_reasons: List[str] = field(default_factory=list)
+    entry_reasons: List[str] = []
+    exit_reasons: List[str] = []
     
     # --- Временные метки ---
     entry_ts_ns: int = 0
@@ -119,7 +119,7 @@ class TradeJournalEntry(msgspec.Struct):
     
     # --- Метаданные ---
     strategy_version: str = "1.0.0"
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = {}
 
 
 # ============================================================

@@ -308,7 +308,10 @@ class LiveRunnerHandler:
     async def on_trade(self, event) -> None:
         """Обработка сделки."""
         self._trade_count += 1
-
+        # Диагностика: логируем некорректные цены
+        if event.price <= 0:
+            logger.error(f"on_trade: invalid price={event.price}, symbol={event.symbol}, trade_id={event.trade_id}")
+            return  # Пропускаем некорректные трейды
         self.tape_manager.on_trade(event)
         self.metrics_manager.on_trade(event)
 
@@ -447,6 +450,9 @@ class LiveRunnerHandler:
     def _check_breakouts(self, symbol: str, price: float) -> None:
         """Проверяет пробой уровней."""
         symbol = symbol.upper()
+        # Защита от некорректных цен
+        if price <= 0:
+            return        
         active_levels = self.level_manager.get_active_levels(symbol)
 
         for level in active_levels:
@@ -770,6 +776,10 @@ class LiveRunnerHandler:
     def check_stop_exits(self, symbol: str, price: float) -> None:
         """Проверяет срабатывание стопов."""
         symbol = symbol.upper()
+        # Защита от некорректных цен (баг в парсинге или бирже)
+        if price <= 0:
+            logger.warning(f"check_stop_exits: invalid price={price}, skipping")
+            return
         position = self._open_positions.get(symbol)
 
         if position is None or not position.is_open:
