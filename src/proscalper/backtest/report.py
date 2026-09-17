@@ -529,11 +529,13 @@ class BacktestReport:
         q = 1.0 - p
         avg_win = self.result.avg_win
         avg_loss = abs(self.result.avg_loss)
-
         if avg_win > 0 and avg_loss > 0:
             m.kelly_fraction = (p * avg_win - q * avg_loss) / (avg_win * avg_loss)
             # Ограничиваем [0, 1] — Kelly может быть отрицательным
             m.kelly_fraction = max(0.0, min(1.0, m.kelly_fraction))
+        elif avg_win > 0 and avg_loss == 0 and p > 0:
+            # Все трейды выигрышные — Kelly = 1.0 (максимальная аллокация)
+            m.kelly_fraction = 1.0
 
     def _r_bucket(self, r: float) -> str:
         """Разбиение R-multiple на bucket."""
