@@ -101,37 +101,51 @@ class Level:
 class LevelDetectorConfig:
     """
     Конфигурация детектора уровней.
-    
+
     Обновление: добавлен параметр timeframe для работы
     с 5-минутными барами вместо 1-секундных.
     """
     # Таймфрейм баров для детекции уровней
     # "1s" — старый режим (шум), "5m" — новый режим (значимые уровни)
     timeframe: str = "5m"
-    
+
     # Параметры фракталов
     left_bars: int = 5              # баров слева от пика
     right_bars: int = 5             # баров справа от пика
     min_prominence: float = 0.001   # минимальная "выпуклость" (0.1%)
-    
+
     # Кластеризация
     cluster_distance_pct: float = 0.002   # 0.2% для кластеризации (5м бары)
+    cluster_distance_ticks: int = 100     # расстояние кластеризации в тиках
     min_touches_for_active: int = 2       # минимум касаний для активации
-    
+
+    # Ширина зоны уровня
+    zone_width_pct: float = 0.001         # ширина зоны в % от цены (0.1%)
+    zone_width_ticks: int = 10            # ширина зоны в тиках
+
     # Сила уровня
     touch_weight: float = 1.0
     volume_weight: float = 0.5
     age_decay_hours: float = 48.0   # затухание силы за 48 часов
-    
+    round_bonus: float = 0.5        # бонус к силе на круглой цене
+
     # Ограничения
     max_levels: int = 20            # максимум уровней на символ
     max_touches: int = 50           # максимум касаний (защита от шума)
-    
+
     # Окно для детекции касаний (в барах)
     touch_lookback_bars: int = 10
-    
+
     # Минимальный возраст уровня для активации (в барах)
     min_age_bars_for_active: int = 3
+
+    # Время жизни уровня (в секундах)
+    max_age_sec: int = 172800       # 48 часов
+
+    # Параметры касаний
+    min_touch_interval_ms: int = 60000      # минимум 60с между касаниями
+    min_strength_for_active: float = 2.0    # минимум силы для активации
+    min_reversal_ticks: int = 10            # минимум тиков разворота
 
 
 class FractalDetector:
@@ -158,9 +172,9 @@ class FractalDetector:
         self._bars.append(bar)
         
         # Индекс бара, который мы проверяем (right_bars назад)
-        pivot_idx = len(self._bars) - self.config.fractal_right_bars - 1
+        pivot_idx = len(self._bars) - self.config.right_bars - 1
         
-        if pivot_idx < self.config.fractal_left_bars:
+        if pivot_idx < self.config.left_bars:
             return None, None
         
         pivot_bar = self._bars[pivot_idx]
@@ -183,12 +197,12 @@ class FractalDetector:
         pivot_high = self._bars[idx].high
         
         # Проверяем left bars
-        for i in range(idx - self.config.fractal_left_bars, idx):
+        for i in range(idx - self.config.left_bars, idx):
             if self._bars[i].high > pivot_high:
                 return False
         
         # Проверяем right bars
-        for i in range(idx + 1, idx + self.config.fractal_right_bars + 1):
+        for i in range(idx + 1, idx + self.config.right_bars + 1):
             if i >= len(self._bars):
                 return False
             if self._bars[i].high > pivot_high:
@@ -201,12 +215,12 @@ class FractalDetector:
         pivot_low = self._bars[idx].low
         
         # Проверяем left bars
-        for i in range(idx - self.config.fractal_left_bars, idx):
+        for i in range(idx - self.config.left_bars, idx):
             if self._bars[i].low < pivot_low:
                 return False
         
         # Проверяем right bars
-        for i in range(idx + 1, idx + self.config.fractal_right_bars + 1):
+        for i in range(idx + 1, idx + self.config.right_bars + 1):
             if i >= len(self._bars):
                 return False
             if self._bars[i].low < pivot_low:
@@ -276,7 +290,7 @@ class LevelDetector:
             self.on_bar(bar)
         
         # Возвращаем количество найденных уровней
-        return len(self.levels) 
+        return len(self._levels) 
 
     def on_bar(self, bar: Bar) -> List[Level]:
         """
