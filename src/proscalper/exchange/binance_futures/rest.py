@@ -55,28 +55,35 @@ class BinanceFuturesRestClient:
     async def _request_with_retry(
         self,
         method: str,
-        path: str,
+        url_or_path: str,
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
-        max_retries: int = 3,
+        max_retries: int = 5,
     ) -> Any:
         """
         Универсальный HTTP-запрос с повторами.
 
-        Используется всеми публичными методами класса.
-        Обрабатывает временные сетевые ошибки и rate limits (429).
-        Не повторяет клиентские ошибки (400, 401, 403, 404).
+        Возвращает httpx.Response объект (а не dict!),
+        чтобы вызывающий код мог работать с .content / .json().
 
-        Возвращает:
-            Распарсенный JSON ответ.
-
-        Выбрасывает:
-            RuntimeError: если все попытки исчерпаны.
+        Args:
+            method: HTTP метод ("GET", "POST", и т.д.)
+            url_or_path: либо полный URL (https://fapi.binance.com/...),
+                         либо относительный путь (/fapi/v1/...)
+            params: query-параметры
+            json_body: JSON body для POST/PUT
+            headers: HTTP заголовки
+            max_retries: максимальное число попыток
         """
         import asyncio
 
-        url = f"{self._base_url}{path}"
+        # Определяем финальный URL
+        if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
+            url = url_or_path
+        else:
+            url = f"{self._base_url}{url_or_path}"
+
         last_exc: Optional[Exception] = None
 
         for attempt in range(max_retries):
@@ -97,14 +104,14 @@ class BinanceFuturesRestClient:
                     **request_kwargs,
                 )
 
-                # Успех
+                # Успех — возвращаем response целиком
                 if response.status_code == 200:
-                    return response.json()
+                    return response
 
                 # Rate limit — ждём и повторяем
                 if response.status_code == 429:
                     retry_after = int(
-                        response.headers.get("Retry-After", 2 ** attempt)
+                        response.headers.get("Retry-After", 2 ** (attempt + 1))
                     )
                     wait_sec = min(retry_after, 30)
                     print(
@@ -117,7 +124,7 @@ class BinanceFuturesRestClient:
 
                 # Серверные ошибки — повторяем
                 if response.status_code >= 500:
-                    wait_sec = min(2 ** attempt, 10)
+                    wait_sec = min(2 ** (attempt + 1), 30)
                     print(
                         f"[REST] Server error {response.status_code}, "
                         f"retry in {wait_sec}s "
@@ -130,7 +137,7 @@ class BinanceFuturesRestClient:
                 error_text = response.text[:500]
                 raise RuntimeError(
                     f"HTTP {response.status_code} "
-                    f"for {method.upper()} {path}: {error_text}"
+                    f"for {method.upper()} {url}: {error_text}"
                 )
 
             except RuntimeError:
@@ -140,7 +147,7 @@ class BinanceFuturesRestClient:
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries - 1:
-                    wait_sec = min(2 ** attempt, 5)
+                    wait_sec = min(2 ** (attempt + 1), 15)
                     print(
                         f"[REST] Network error: {exc}, "
                         f"retry in {wait_sec}s "
@@ -152,7 +159,7 @@ class BinanceFuturesRestClient:
 
         raise RuntimeError(
             f"Request failed after {max_retries} attempts: "
-            f"{method.upper()} {path}: {last_exc}"
+            f"{method.upper()} {url}: {last_exc}"
         )
 
     async def get_server_time(self) -> int:
