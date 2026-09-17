@@ -20,7 +20,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional
 
-from proscalper.core.types import TradeEvent
+from proscalper.core.events import TradeEvent
 
 
 @dataclass
