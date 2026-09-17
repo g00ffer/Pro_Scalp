@@ -99,30 +99,39 @@ class Level:
 
 @dataclass
 class LevelDetectorConfig:
-    """Конфигурация детектора уровней."""
+    """
+    Конфигурация детектора уровней.
+    
+    Обновление: добавлен параметр timeframe для работы
+    с 5-минутными барами вместо 1-секундных.
+    """
+    # Таймфрейм баров для детекции уровней
+    # "1s" — старый режим (шум), "5m" — новый режим (значимые уровни)
+    timeframe: str = "5m"
+    
     # Параметры фракталов
-    fractal_left_bars: int = 2
-    fractal_right_bars: int = 2
+    left_bars: int = 5              # баров слева от пика
+    right_bars: int = 5             # баров справа от пика
+    min_prominence: float = 0.001   # минимальная "выпуклость" (0.1%)
     
-    # Параметры зон
-    zone_width_ticks: int = 3
-    zone_width_pct: float = 0.0003  # 0.03%
+    # Кластеризация
+    cluster_distance_pct: float = 0.002   # 0.2% для кластеризации (5м бары)
+    min_touches_for_active: int = 2       # минимум касаний для активации
     
-    # Параметры касаний
-    min_touches_for_active: int = 2
-    min_reversal_ticks: int = 4
-    touch_confirmation_ms: int = 3000
-    min_touch_interval_ms: int = 20000
+    # Сила уровня
+    touch_weight: float = 1.0
+    volume_weight: float = 0.5
+    age_decay_hours: float = 48.0   # затухание силы за 48 часов
     
-    # Параметры силы
-    min_strength_for_active: float = 3.0
-    max_age_sec: float = 14400  # 4 часа
+    # Ограничения
+    max_levels: int = 20            # максимум уровней на символ
+    max_touches: int = 50           # максимум касаний (защита от шума)
     
-    # Кластеризация (увеличено для лучшего объединения близких уровней)
-    cluster_distance_ticks: int = 10
+    # Окно для детекции касаний (в барах)
+    touch_lookback_bars: int = 10
     
-    # Круглые числа
-    round_bonus: float = 0.5
+    # Минимальный возраст уровня для активации (в барах)
+    min_age_bars_for_active: int = 3
 
 
 class FractalDetector:
@@ -230,7 +239,45 @@ class LevelDetector:
         self._fractal_detector = FractalDetector(self.config)
         self._levels: Dict[str, Level] = {}
         self._level_counter = 0
-    
+
+    def load_from_klines(self, klines: List[List]) -> int:
+        """
+        Инициализация детектора из исторических свечей.
+        
+        Вызывается при старте системы для загрузки карты уровней
+        из 24-часовой истории.
+        
+        Args:
+            klines: список свечей в формате Binance (из get_klines())
+        
+        Returns:
+            Количество обнаруженных уровней
+        """
+        # Конвертируем klines в Bar объекты
+        bars = []
+        for kline in klines:
+            bar = Bar(
+                ts_ns=kline[0] * 1_000_000,  # ms -> ns
+                symbol=self.symbol,
+                open=float(kline[1]),
+                high=float(kline[2]),
+                low=float(kline[3]),
+                close=float(kline[4]),
+                volume=float(kline[5]),
+                notional=float(kline[7]),  # quote volume
+                trade_count=int(kline[8]),
+                buy_volume=float(kline[9]) if len(kline) > 9 else 0.0,
+                sell_volume=float(kline[5]) - float(kline[9]) if len(kline) > 9 else 0.0,
+            )
+            bars.append(bar)
+        
+        # Прогоняем все бары через детектор
+        for bar in bars:
+            self.on_bar(bar)
+        
+        # Возвращаем количество найденных уровней
+        return len(self.levels) 
+
     def on_bar(self, bar: Bar) -> List[Level]:
         """
         Обработка нового бара.
@@ -537,6 +584,52 @@ class LevelManager:
         self._detectors: Dict[str, LevelDetector] = {}
         self._tick_sizes = tick_sizes
     
+    async def initialize_from_history(
+        self,
+        rest_client,
+        symbols: List[str],
+        interval: str = "5m",
+        hours: float = 24.0,
+    ) -> Dict[str, int]:
+        """
+        Инициализация детекторов уровней из истории через REST.
+        
+        Вызывается при старте коллекционера для загрузки
+        карты уровней из 24-часовой истории.
+        
+        Args:
+            rest_client: BinanceFuturesRestClient
+            symbols: список символов для инициализации
+            interval: таймфрейм баров (по умолчанию "5m")
+            hours: глубина истории в часах (по умолчанию 24)
+        
+        Returns:
+            Словарь {символ: количество уровней}
+        """
+        results = {}
+        
+        for symbol in symbols:
+            try:
+                # Загружаем историю
+                klines = await rest_client.get_klines_last_hours(
+                    symbol=symbol,
+                    interval=interval,
+                    hours=hours,
+                )
+                
+                # Получаем или создаём детектор
+                detector = self.get_or_create(symbol)
+                
+                # Загружаем уровни из истории
+                level_count = detector.load_from_klines(klines)
+                results[symbol] = level_count
+                
+            except Exception as exc:
+                # Ошибка загрузки не должна ронять систему
+                results[symbol] = 0
+        
+        return results
+
     def get_or_create(
         self,
         symbol: str,

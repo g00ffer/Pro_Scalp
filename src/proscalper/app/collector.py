@@ -4,6 +4,11 @@
 Запускает WebSocket-шлюз, синхронизирует стаканы, анализирует ленту сделок,
 агрегирует бары, детектирует уровни и записывает рыночные события на диск.
 
+Обновление:
+- Загрузка 24ч истории через REST при старте для инициализации уровней
+- Разделение агрегаторов: 1с (лента) и 5м (уровни)
+- Детектор уровней работает на 5-минутных барах
+
 Использование:
     python -m proscalper.app.collector configs/default.yaml
 """
@@ -35,6 +40,14 @@ from proscalper.features.levels import LevelManager, LevelDetectorConfig
 from proscalper.storage.delta_writer import MarketDataRecorder
 
 
+# ============================================================
+# Константы таймфреймов
+# ============================================================
+
+TAPE_TF_NS = 1_000_000_000        # 1 секунда — для ленты и компрессии
+LEVEL_TF_NS = 300_000_000_000     # 5 минут — для детектора уровней
+
+
 @dataclass
 class CollectorConfig:
     """Конфигурация сборщика данных."""
@@ -45,6 +58,9 @@ class CollectorConfig:
     batch_size: int = 1000
     flush_interval_ms: int = 200
     queue_size: int = 50_000
+    # Параметры загрузки истории
+    history_interval: str = "5m"
+    history_hours: float = 24.0
 
 
 def load_config(config_path: str) -> CollectorConfig:
@@ -62,6 +78,8 @@ def load_config(config_path: str) -> CollectorConfig:
         batch_size=collector_data.get("batch_size", 1000),
         flush_interval_ms=collector_data.get("flush_interval_ms", 200),
         queue_size=collector_data.get("queue_size", 50_000),
+        history_interval=collector_data.get("history_interval", "5m"),
+        history_hours=collector_data.get("history_hours", 24.0),
     )
 
 
@@ -74,7 +92,8 @@ class CollectorHandler:
     - локальными стаканами (FastOrderBook)
     - BookTickerGuard (fast validation)
     - TapeManager (анализ ленты)
-    - MultiTimeframeAggregator (построение баров)
+    - ленточными агрегаторами (1с бары)
+    - уровневыми агрегаторами (5м бары)
     - LevelManager (детектор уровней)
     """
 
@@ -84,29 +103,36 @@ class CollectorHandler:
         books: Dict[str, FastOrderBook],
         guard: BookTickerGuard,
         tape_manager: TapeManager,
-        bar_aggregators: Dict[str, MultiTimeframeAggregator],
+        tape_aggregators: Dict[str, MultiTimeframeAggregator],
+        level_aggregators: Dict[str, MultiTimeframeAggregator],
         level_manager: LevelManager,
     ) -> None:
         self.recorder = recorder
         self.books = books
         self.guard = guard
         self.tape_manager = tape_manager
-        self.bar_aggregators = bar_aggregators
+        self.tape_aggregators = tape_aggregators
+        self.level_aggregators = level_aggregators
         self.level_manager = level_manager
 
         # Счётчики для status logger
         self._trade_count = 0
         self._book_ticker_count = 0
         self._book_delta_count = 0
-        self._bar_count = 0
+        self._tape_bar_count = 0
+        self._level_bar_count = 0
         self._level_count = 0
         self._last_status_ts = time.time()
 
-    def _on_bar_close(self, bar: Bar) -> None:
-        """Callback при закрытии бара."""
-        self._bar_count += 1
+    def _on_tape_bar_close(self, bar: Bar) -> None:
+        """Callback при закрытии 1с бара (лента/компрессия)."""
+        self._tape_bar_count += 1
 
-        # Передаём бар в LevelManager
+    def _on_level_bar_close(self, bar: Bar) -> None:
+        """Callback при закрытии 5м бара (детектор уровней)."""
+        self._level_bar_count += 1
+
+        # Передаём 5м бар в LevelManager
         new_levels = self.level_manager.on_bar(bar)
         self._level_count += len(new_levels)
 
@@ -125,10 +151,15 @@ class CollectorHandler:
         # Обновляем TapeAnalyzer
         self.tape_manager.on_trade(event)
 
-        # Обновляем BarAggregator
-        aggregator = self.bar_aggregators.get(event.symbol.upper())
-        if aggregator is not None:
-            aggregator.on_trade(event)
+        # Обновляем ленточные агрегаторы (1с)
+        tape_agg = self.tape_aggregators.get(event.symbol.upper())
+        if tape_agg is not None:
+            tape_agg.on_trade(event)
+
+        # Обновляем уровневые агрегаторы (5м)
+        level_agg = self.level_aggregators.get(event.symbol.upper())
+        if level_agg is not None:
+            level_agg.on_trade(event)
 
         await self.recorder.record_trade(event)
 
@@ -148,24 +179,19 @@ class CollectorHandler:
     async def on_delta_batch(self, event) -> None:
         """Применение пакета дельт стакана."""
         self._book_delta_count += 1
-
         book = self.books.get(event.symbol.upper())
-
         if book is not None:
             ok = book.apply_delta_batch(event)
-
             if not ok or book.out_of_sync:
                 print(
                     f"[OUT_OF_SYNC] {event.symbol} "
                     f"reason={book.out_of_sync_reason}"
                 )
-
         await self.recorder.record_book_delta(event)
 
     async def on_snapshot_requested(self, symbol: str) -> None:
         """
         Вызывается перед запросом snapshot через REST.
-
         Помечает стакан, что snapshot запрошен, чтобы буферизовать
         приходящие depth events до применения snapshot.
         """
@@ -176,7 +202,6 @@ class CollectorHandler:
     async def reset_books(self) -> None:
         """
         Сбрасывает все локальные стаканы, tape, bars и levels.
-
         Вызывается перед каждым новым подключением к WS,
         чтобы старые события не мешали синхронизации.
         """
@@ -185,14 +210,19 @@ class CollectorHandler:
 
         self.tape_manager.reset_all()
 
-        for aggregator in self.bar_aggregators.values():
+        for aggregator in self.tape_aggregators.values():
             aggregator.reset()
 
-        self.level_manager.reset_all()
+        for aggregator in self.level_aggregators.values():
+            aggregator.reset()
+
+        # НЕ сбрасываем level_manager — уровни загружены из истории
+        # и должны сохраняться между reconnect'ами
 
         print(
-            f"[RESET] Очищены стаканы, tape, bars и levels "
-            f"для {len(self.books)} символов"
+            f"[RESET] Очищены стаканы, tape, bars "
+            f"для {len(self.books)} символов "
+            f"(уровни сохранены)"
         )
 
     async def on_state(self, state: str, details: Dict[str, Any]) -> None:
@@ -202,12 +232,12 @@ class CollectorHandler:
         # Печатаем статус каждые 10 секунд
         now = time.time()
         if now - self._last_status_ts >= 10.0:
-            # Базовые счётчики
             print(
                 f"[STATUS] trades={self._trade_count}, "
                 f"book_tickers={self._book_ticker_count}, "
                 f"book_deltas={self._book_delta_count}, "
-                f"bars={self._bar_count}, "
+                f"tape_bars={self._tape_bar_count}, "
+                f"level_bars={self._level_bar_count}, "
                 f"levels={self._level_count}"
             )
 
@@ -244,32 +274,56 @@ async def run_collector(config: CollectorConfig) -> None:
     Основная функция сборщика.
     """
     # ========================================
-    # 1. Загружаем информацию об инструментах
+    # 1. Загружаем информацию об инструментах + историю
     # ========================================
     registry = InstrumentRegistry()
+    history_klines: Dict[str, List] = {}
 
     async with BinanceFuturesRestClient() as rest_client:
         instruments = await rest_client.get_exchange_info()
         registry.load_from_exchange_info(instruments)
 
-    # Проверяем, что все символы есть в реестре
-    for symbol in config.symbols:
-        if registry.get_instrument(symbol) is None:
-            raise ValueError(f"Символ {symbol} не найден в exchangeInfo")
+        # Проверяем, что все символы есть в реестре
+        for symbol in config.symbols:
+            if registry.get_instrument(symbol) is None:
+                raise ValueError(f"Символ {symbol} не найден в exchangeInfo")
 
-    print(f"Загружено инструментов: {len(registry.all_symbols())}")
-    print(f"Рабочие символы: {', '.join(config.symbols)}")
+        print(f"Загружено инструментов: {len(registry.all_symbols())}")
+        print(f"Рабочие символы: {', '.join(config.symbols)}")
+
+        # ============================================================
+        # ЗАГРУЗКА ИСТОРИИ ДЛЯ ДЕТЕКТОРА УРОВНЕЙ
+        # 24 часа × 5м = 288 баров на символ
+        # ============================================================
+        print(
+            f"Загрузка истории: {config.history_hours}ч "
+            f"× {config.history_interval} бары..."
+        )
+
+        for symbol in config.symbols:
+            try:
+                klines = await rest_client.get_klines_last_hours(
+                    symbol=symbol,
+                    interval=config.history_interval,
+                    hours=config.history_hours,
+                )
+                history_klines[symbol] = klines
+                print(
+                    f"  {symbol}: загружено {len(klines)} свечей"
+                )
+            except Exception as exc:
+                print(
+                    f"  [WARN] {symbol}: не удалось загрузить историю: {exc}"
+                )
 
     # ========================================
     # 2. Создаём локальные стаканы
     # ========================================
     books: Dict[str, FastOrderBook] = {}
-
     for symbol in config.symbols:
         tick_size = registry.get_tick_size(symbol)
         if tick_size is None:
             raise ValueError(f"Не найден tick_size для {symbol}")
-
         books[symbol.upper()] = FastOrderBook(
             symbol=symbol,
             tick_size=tick_size,
@@ -294,35 +348,57 @@ async def run_collector(config: CollectorConfig) -> None:
     tape_manager = TapeManager()
 
     # ========================================
-    # 5. Создаём LevelManager
+    # 5. Создаём LevelManager + загружаем историю
     # ========================================
     level_manager = LevelManager(tick_sizes=tick_sizes)
 
-    # ========================================
-    # 6. Создаём BarAggregators
-    # ========================================
-    bar_aggregators: Dict[str, MultiTimeframeAggregator] = {}
+    # Инициализация детекторов уровней из истории
+    for symbol, klines in history_klines.items():
+        detector = level_manager.get_or_create(symbol)
+        level_count = detector.load_from_klines(klines)
+        print(
+            f"[LEVELS] {symbol}: инициализировано {level_count} уровней "
+            f"из {len(klines)} баров истории"
+        )
 
-    # Временный callback для bar close (будет заменён после создания полного handler)
-    def _temp_on_bar_close(bar: Bar) -> None:
-        pass
+    # Для символов без истории — просто создаём детектор
+    for symbol in config.symbols:
+        level_manager.get_or_create(symbol)
+
+    # ========================================
+    # 6. Создаём ленточные агрегаторы (1с)
+    # ========================================
+    tape_aggregators: Dict[str, MultiTimeframeAggregator] = {}
+
+    def _temp_tape_bar_close(bar: Bar) -> None:
+        pass  # будет заменён после создания handler
 
     for symbol in config.symbols:
         aggregator = MultiTimeframeAggregator(
             symbol=symbol,
-            timeframes_ns=[
-                1_000_000_000,   # 1 second
-                5_000_000_000,   # 5 seconds
-            ],
-            on_bar_close=_temp_on_bar_close,
+            timeframes_ns=[TAPE_TF_NS],  # 1 секунда
+            on_bar_close=_temp_tape_bar_close,
         )
-        bar_aggregators[symbol.upper()] = aggregator
-
-        # Создаём LevelDetector для этого символа
-        level_manager.get_or_create(symbol)
+        tape_aggregators[symbol.upper()] = aggregator
 
     # ========================================
-    # 7. Создаём рекордер
+    # 7. Создаём уровневые агрегаторы (5м)
+    # ========================================
+    level_aggregators: Dict[str, MultiTimeframeAggregator] = {}
+
+    def _temp_level_bar_close(bar: Bar) -> None:
+        pass  # будет заменён после создания handler
+
+    for symbol in config.symbols:
+        aggregator = MultiTimeframeAggregator(
+            symbol=symbol,
+            timeframes_ns=[LEVEL_TF_NS],  # 5 минут
+            on_bar_close=_temp_level_bar_close,
+        )
+        level_aggregators[symbol.upper()] = aggregator
+
+    # ========================================
+    # 8. Создаём рекордер
     # ========================================
     recorder = MarketDataRecorder(
         base_dir=config.data_dir,
@@ -330,28 +406,32 @@ async def run_collector(config: CollectorConfig) -> None:
         flush_interval_ms=config.flush_interval_ms,
         queue_size=config.queue_size,
     )
-
     await recorder.start()
 
     # ========================================
-    # 8. Создаём обработчик
+    # 9. Создаём обработчик
     # ========================================
     handler = CollectorHandler(
         recorder=recorder,
         books=books,
         guard=guard,
         tape_manager=tape_manager,
-        bar_aggregators=bar_aggregators,
+        tape_aggregators=tape_aggregators,
+        level_aggregators=level_aggregators,
         level_manager=level_manager,
     )
 
-    # Обновляем callback в bar aggregators на реальный метод handler
-    for aggregator in bar_aggregators.values():
+    # Подключаем реальные callback'и к агрегаторам
+    for aggregator in tape_aggregators.values():
         for inner_agg in aggregator._aggregators.values():
-            inner_agg._on_bar_close = handler._on_bar_close
+            inner_agg._on_bar_close = handler._on_tape_bar_close
+
+    for aggregator in level_aggregators.values():
+        for inner_agg in aggregator._aggregators.values():
+            inner_agg._on_bar_close = handler._on_level_bar_close
 
     # ========================================
-    # 9. Создаём WS-шлюз
+    # 10. Создаём WS-шлюз
     # ========================================
     ws_config = BinanceFuturesWSConfig(
         symbols=config.symbols,
@@ -365,7 +445,7 @@ async def run_collector(config: CollectorConfig) -> None:
     )
 
     # ========================================
-    # 10. Обработка сигналов остановки
+    # 11. Обработка сигналов остановки
     # ========================================
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -378,23 +458,18 @@ async def run_collector(config: CollectorConfig) -> None:
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
-            # Windows не поддерживает add_signal_handler для SIGTERM
-            pass
+            pass  # Windows
 
     # ========================================
-    # 11. Запуск
+    # 12. Запуск
     # ========================================
     try:
         gateway_task = asyncio.create_task(gateway.run())
-
-        # Ждём сигнала остановки
         await stop_event.wait()
 
-        # Останавливаем шлюз
         await gateway.stop()
-
-        # Быстрая отмена без долгого ожидания
         gateway_task.cancel()
+
         try:
             await gateway_task
         except asyncio.CancelledError:
@@ -407,12 +482,14 @@ async def run_collector(config: CollectorConfig) -> None:
 
     finally:
         # Flush все открытые бары
-        for aggregator in bar_aggregators.values():
+        for aggregator in tape_aggregators.values():
+            aggregator.flush()
+        for aggregator in level_aggregators.values():
             aggregator.flush()
 
         await recorder.close()
 
-        # Выводим статистику
+        # Статистика записи
         stats = recorder.stats()
         print("\nСтатистика записи:")
         for event_type, counts in stats.items():
@@ -423,8 +500,9 @@ async def run_collector(config: CollectorConfig) -> None:
             )
 
         print(f"\nДополнительно:")
-        print(f"  bars: {handler._bar_count}")
-        print(f"  levels: {handler._level_count}")
+        print(f"  tape_bars (1s): {handler._tape_bar_count}")
+        print(f"  level_bars (5m): {handler._level_bar_count}")
+        print(f"  new_levels: {handler._level_count}")
 
         # Выводим активные уровни
         for symbol in config.symbols:

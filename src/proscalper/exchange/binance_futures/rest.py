@@ -14,7 +14,7 @@ REST-клиент для Binance USDT-M Futures.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-
+import time
 import httpx
 import msgspec
 
@@ -159,3 +159,108 @@ class BinanceFuturesRestClient:
 
         except Exception:
             return None
+
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str = "5m",
+        limit: int = 288,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[List]:
+        """
+        Загрузка исторических свечей (klines).
+        
+        Используется для:
+        - Построения карты уровней при старте
+        - Бэктестинга
+        
+        Args:
+            symbol: Символ инструмента (например, "BTCUSDT")
+            interval: Таймфрейм свечи. Возможные значения:
+                      1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d
+            limit: Количество свечей (максимум 1500)
+            start_time: Время начала в миллисекундах (опционально)
+            end_time: Время конца в миллисекундах (опционально)
+        
+        Returns:
+            Список свечей в формате Binance:
+            [
+                [
+                    1499040000000,      # Open time (ms)
+                    "0.01634790",       # Open
+                    "0.80000000",       # High
+                    "0.01575800",       # Low
+                    "0.01577100",       # Close
+                    "148976.11427815",  # Volume
+                    1499644799999,      # Close time (ms)
+                    "2434.19055334",    # Quote asset volume
+                    308,                # Number of trades
+                    "1756.87402397",    # Taker buy base asset volume
+                    "28.46694368",      # Taker buy quote asset volume
+                    "17928899.62484339" # Ignore
+                ],
+                ...
+            ]
+        
+        Пример:
+            # 24 часа 5-минутных свечей
+            klines = await client.get_klines("BTCUSDT", interval="5m", limit=288)
+        """
+        params = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": min(limit, 1500),
+        }
+        
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
+        
+        response = await self._request_with_retry(
+            "GET",
+            f"{self._base_url}/fapi/v1/klines",
+            params=params,
+        )
+        
+        return msgspec.json.decode(response.content)
+    
+    async def get_klines_last_hours(
+        self,
+        symbol: str,
+        interval: str = "5m",
+        hours: float = 24.0,
+    ) -> List[List]:
+        """
+        Загрузка свечей за последние N часов.
+        
+        Удобная обёртка над get_klines() для загрузки истории
+        при старте системы.
+        
+        Пример:
+            # 24 часа 5-минутных свечей
+            klines = await client.get_klines_last_hours("BTCUSDT", interval="5m", hours=24)
+        """
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - int(hours * 3600 * 1000)
+        
+        # Рассчитываем нужное количество свечей
+        interval_map = {
+            "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+            "1h": 60, "2h": 120, "4h": 240, "6h": 360,
+            "8h": 480, "12h": 720, "1d": 1440,
+        }
+        interval_minutes = interval_map.get(interval, 5)
+        
+        # Количество свечей за указанный период
+        total_minutes = hours * 60
+        limit = int(total_minutes / interval_minutes) + 1
+        limit = min(limit, 1500)  # API максимум
+        
+        return await self.get_klines(
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_ms,
+        )            
