@@ -28,7 +28,6 @@ latency model, ведёт PnL и trade journal.
 Использование:
     class MyStrategy:
         def on_market_update(self, ctx, engine):
-            # торговая логика
             if should_buy:
                 engine.submit_market_order(
                     symbol="BTCUSDT", side=OrderSide.BUY,
@@ -45,16 +44,13 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
+from typing import List, Optional, Protocol, Tuple
 
 from proscalper.backtest.costs import CostCalculator, FeeConfig, SlippageConfig
 from proscalper.backtest.latency import (
-    LatencyBreakdown,
     LatencyModel,
     ProfileLatency,
     Region,
-    apply_latency_to_submit_ts,
     ms_to_ns,
 )
 from proscalper.backtest.matching import (
@@ -62,7 +58,6 @@ from proscalper.backtest.matching import (
     MatchStatus,
     MatchingEngine,
 )
-from proscalper.core.events import BookDeltaBatchEvent, BookSnapshotEvent
 from proscalper.core.types import OrderSide
 from proscalper.market_data.orderbook_fast import FastOrderBook
 from proscalper.storage.replay_builder import ReplayBuilder, ReplayConfig
@@ -140,7 +135,6 @@ class BacktestResult:
     end_ts_ns: int = 0
     initial_balance: float = 0.0
     final_balance: float = 0.0
-
     trades: List[BacktestTrade] = field(default_factory=list)
 
     # Метрики
@@ -230,7 +224,6 @@ class BacktestResult:
 class BacktestContext:
     """
     Снимок рынка в момент обработки события.
-
     Стратегия читает book/ts/last_fill_result и вызывает
     методы engine для отправки ордеров.
     """
@@ -265,6 +258,7 @@ class StrategyProtocol(Protocol):
     - читать контекст
     - вызывать engine.submit_* для отправки ордеров
     """
+
     def on_market_update(
         self,
         ctx: BacktestContext,
@@ -328,10 +322,12 @@ class BacktestEngine:
             fee_config=self.config.fee_config,
             slippage_config=self.config.slippage_config,
         )
+
         self.matching = MatchingEngine(
             tick_size=self.config.tick_size,
             cost_calculator=self.costs,
         )
+
         self.latency: LatencyModel = (
             latency_model
             if latency_model is not None
@@ -342,11 +338,15 @@ class BacktestEngine:
         self._position = BacktestPosition(symbol="")
 
         # Очередь отложенных fill-событий (по latency)
-        # (fill_ts_ns, seq, FillResult, reason)
-        self._pending_fills: List[Tuple[int, int, FillResult, str]] = []
+        # (fill_ts_ns, seq, FillResult, reason, side)
+        self._pending_fills: List[Tuple[int, int, FillResult, str, OrderSide]] = []
         self._fill_seq_counter = 0
-
         self._result: Optional[BacktestResult] = None
+
+        # FIX #1: инициализация обязательна — без этого при пустых данных
+        # падает AttributeError в _apply_due_fills / submit_market_order
+        self._result_book: Optional[FastOrderBook] = None
+        self._current_ts_ns: int = 0
 
     # ============================================
     # Регистрация
@@ -384,10 +384,8 @@ class BacktestEngine:
         bids = book.top_bids(self.config.depth_for_matching)
         asks = book.top_asks(self.config.depth_for_matching)
 
-        # Проверяем, что ордер закрывает существующую позицию или открывает новую
-        # В первой версии — если открыта противоположная позиция, сначала закроем её
+        # В первой версии — если открыта позиция, не даём открывать вторую
         if self._position.is_open:
-            # Упрощённо: не даём открывать вторую позицию
             return
 
         fill = self.matching.match_market(
@@ -409,7 +407,6 @@ class BacktestEngine:
         # Latency: сдвигаем момент применения
         breakdown = self.latency.sample()
         fill_ts_ns = self._current_ts_ns + ms_to_ns(breakdown.submit_to_fill_ms)
-
         self._schedule_fill(fill_ts_ns, fill, reason=reason, side=side)
 
     def submit_marketable_limit_ioc_order(
@@ -423,11 +420,13 @@ class BacktestEngine:
         """IOC-ордер: ограничение цены."""
         if self._result is None:
             return
+
         self._result.total_orders += 1
 
         book = self._result_book
         if book is None:
             return
+
         if self._position.is_open:
             return
 
@@ -525,6 +524,8 @@ class BacktestEngine:
         self._position = BacktestPosition(symbol=symbol)
         self._pending_fills.clear()
         self._fill_seq_counter = 0
+        self._result_book = None
+        self._current_ts_ns = 0
 
         # Готовим replay
         replay = ReplayBuilder(ReplayConfig(
@@ -532,28 +533,23 @@ class BacktestEngine:
             use_parquet=self.config.use_parquet,
         ))
 
-        book = FastOrderBook(symbol=symbol, tick_size=self.config.tick_size)
-        self._result_book = book
-
-        # Итератор по дельтам (с авто-resync через keyframes)
+        # FIX #2: replay_day() возвращает кортежи (book, delta).
+        # book уже содержит применённую дельту — используем его напрямую,
+        # вместо создания отдельного FastOrderBook здесь.
         deltas = replay.replay_day(
             symbol=symbol,
             date_str=date_str,
             tick_size=self.config.tick_size,
         )
 
-        for delta in deltas:
+        for book, delta in deltas:
+            self._result_book = book
             self._current_ts_ns = delta.ts_exchange_ns
 
-            # 1. Применяем book delta (replay уже применяет,
-            # но мы получаем book после применения)
-            # book — это тот же объект, что в replay
-            # Он уже содержит дельту
-
-            # 2. Применяем отложенные fills, чьё время пришло
+            # 1. Применяем отложенные fills, чьё время пришло
             self._apply_due_fills(self._current_ts_ns)
 
-            # 3. Вызываем стратегию
+            # 2. Вызываем стратегию
             if self._strategy is not None:
                 ctx = BacktestContext(
                     ts_ns=self._current_ts_ns,
@@ -575,9 +571,16 @@ class BacktestEngine:
         # Финальный flush — применяем все pending fills
         self._apply_due_fills(self._current_ts_ns or 0, force=True)
 
-        # Если позиция ещё открыта — принудительно закрываем по последней цене
-        if self._position.is_open and book.mid_price:
-            mid = book.mid_price
+        # FIX #3: принудительное закрытие позиции по последней цене.
+        # Используем self._result_book с проверкой None
+        # (при пустых данных _result_book остаётся None).
+        final_book = self._result_book
+        if (
+            self._position.is_open
+            and final_book is not None
+            and final_book.mid_price
+        ):
+            mid = final_book.mid_price
             exit_price = mid
             gross_pnl = self._compute_gross_pnl(
                 side=self._position.side,
@@ -692,13 +695,16 @@ class BacktestEngine:
             return
 
         pos = self._position
+
         if slippage_cost is None:
             slippage_cost = pos.entry_slippage_cost
 
         net_pnl = gross_pnl - fees
 
         # R-multiple
-        initial_risk_per_unit = abs(pos.entry_price - pos.stop_price) if pos.stop_price else 0.0
+        initial_risk_per_unit = (
+            abs(pos.entry_price - pos.stop_price) if pos.stop_price else 0.0
+        )
         r_multiple = 0.0
         if initial_risk_per_unit > 0:
             r_multiple = net_pnl / (initial_risk_per_unit * pos.quantity)
