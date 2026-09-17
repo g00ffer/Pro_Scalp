@@ -52,6 +52,8 @@ from proscalper.core.clock import get_clock, SystemClock
 from proscalper.core.instrument_registry import InstrumentRegistry
 from proscalper.core.logging import get_logger, setup_logging, LogContext
 from proscalper.core.types import OrderSide, BookSide
+from proscalper.core.events import BookSnapshotEvent, BookLevel
+
 from proscalper.exchange.binance_futures.auth import (
     BinanceAuth,
     BinanceCredentials,
@@ -101,7 +103,6 @@ from proscalper.journal.reasons import (
     ExitReason,
 )
 from proscalper.storage.delta_writer import MarketDataRecorder
-
 
 logger = get_logger(__name__)
 
@@ -236,8 +237,8 @@ class LiveRunnerHandler:
     Обработчик рыночных событий с торговой логикой.
 
     Работает в двух режимах:
-    - paper: исполнение через PaperExecutor
-    - live: исполнение через BinanceOrderClient
+     - paper: исполнение через PaperExecutor
+     - live: исполнение через BinanceOrderClient
     """
 
     def __init__(
@@ -308,10 +309,15 @@ class LiveRunnerHandler:
     async def on_trade(self, event) -> None:
         """Обработка сделки."""
         self._trade_count += 1
+
         # Диагностика: логируем некорректные цены
         if event.price <= 0:
-            logger.error(f"on_trade: invalid price={event.price}, symbol={event.symbol}, trade_id={event.trade_id}")
+            logger.error(
+                f"on_trade: invalid price={event.price}, "
+                f"symbol={event.symbol}, trade_id={event.trade_id}"
+            )
             return  # Пропускаем некорректные трейды
+
         self.tape_manager.on_trade(event)
         self.metrics_manager.on_trade(event)
 
@@ -352,7 +358,6 @@ class LiveRunnerHandler:
     async def on_snapshot(self, event) -> None:
         """Применение снапшота стакана."""
         symbol = event.symbol.upper()
-
         book = self.books.get(symbol)
         if book is not None:
             book.apply_snapshot(event)
@@ -432,7 +437,6 @@ class LiveRunnerHandler:
     def _on_level_bar_close(self, bar: Bar) -> None:
         """Закрытие 5м бара (уровни)."""
         new_levels = self.level_manager.on_bar(bar)
-
         for level in new_levels:
             logger.info(
                 "New level",
@@ -450,9 +454,11 @@ class LiveRunnerHandler:
     def _check_breakouts(self, symbol: str, price: float) -> None:
         """Проверяет пробой уровней."""
         symbol = symbol.upper()
+
         # Защита от некорректных цен
         if price <= 0:
-            return        
+            return
+
         active_levels = self.level_manager.get_active_levels(symbol)
 
         for level in active_levels:
@@ -466,7 +472,6 @@ class LiveRunnerHandler:
                     side=OrderSide.BUY,
                     price=price,
                 )
-
             elif level.side.name == "SUPPORT" and price < level.center:
                 self._handle_breakout_signal(
                     symbol=symbol,
@@ -589,8 +594,8 @@ class LiveRunnerHandler:
         # Расчёт размера позиции
         capital = self.config.risk.initial_capital
         risk_pct = self.config.risk.risk_per_trade_pct
-
         tick_size = self.tick_sizes.get(symbol, 0.01)
+
         stop_buffer = max(
             self.config.risk.stop_buffer_ticks * tick_size,
             level.center * self.config.risk.stop_buffer_pct,
@@ -603,7 +608,6 @@ class LiveRunnerHandler:
 
         risk_amount = capital * risk_pct / 100.0
         risk_per_unit = abs(entry_price - stop_price)
-
         if risk_per_unit <= 0:
             return
 
@@ -611,10 +615,19 @@ class LiveRunnerHandler:
 
         # Проверяем минимальный/максимальный номинал
         notional = quantity * entry_price
+
         if notional < self.config.risk.min_notional_per_trade:
-            quantity = self.config.risk.min_notional_per_trade / entry_price if entry_price > 0 else 0.0
+            quantity = (
+                self.config.risk.min_notional_per_trade / entry_price
+                if entry_price > 0
+                else 0.0
+            )
         elif notional > self.config.risk.max_notional_per_trade:
-            quantity = self.config.risk.max_notional_per_trade / entry_price if entry_price > 0 else 0.0
+            quantity = (
+                self.config.risk.max_notional_per_trade / entry_price
+                if entry_price > 0
+                else 0.0
+            )
 
         self.decision_journal.log_risk_approved(
             symbol=symbol,
@@ -655,7 +668,11 @@ class LiveRunnerHandler:
 
         self.trade_journal.log_open(
             symbol=symbol,
-            direction=TradeDirection.LONG if side == OrderSide.BUY else TradeDirection.SHORT,
+            direction=(
+                TradeDirection.LONG
+                if side == OrderSide.BUY
+                else TradeDirection.SHORT
+            ),
             signal_id=signal_id,
             position_id=position.position_id,
             entry_price=entry_price,
@@ -712,7 +729,9 @@ class LiveRunnerHandler:
         )
 
         # Стоп-ордер
-        stop_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY
+        stop_side = (
+            OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY
+        )
         stop_params = OrderParams(
             symbol=position.symbol,
             side=stop_side,
@@ -725,7 +744,6 @@ class LiveRunnerHandler:
         )
 
         # Отправляем пакет (вход + стоп)
-        # Используем asyncio для отправки
         asyncio.create_task(self._submit_live_orders(
             position=position,
             entry_params=entry_params,
@@ -776,10 +794,14 @@ class LiveRunnerHandler:
     def check_stop_exits(self, symbol: str, price: float) -> None:
         """Проверяет срабатывание стопов."""
         symbol = symbol.upper()
+
         # Защита от некорректных цен (баг в парсинге или бирже)
         if price <= 0:
-            logger.warning(f"check_stop_exits: invalid price={price}, skipping")
+            logger.warning(
+                f"check_stop_exits: invalid price={price}, skipping"
+            )
             return
+
         position = self._open_positions.get(symbol)
 
         if position is None or not position.is_open:
@@ -863,16 +885,22 @@ class LiveRunnerHandler:
 
         for symbol, position in list(self._open_positions.items()):
             book = self.books.get(symbol)
-            exit_price = book.mid_price if book is not None else position.entry_price
+            exit_price = (
+                book.mid_price if book is not None else position.entry_price
+            )
 
-            self._close_position(position, exit_price, ExitReason.EMERGENCY_FLATTEN)
+            self._close_position(
+                position, exit_price, ExitReason.EMERGENCY_FLATTEN
+            )
 
             # В live режиме отменяем все ордера
             if self.mode == "live" and self.order_client is not None:
                 try:
                     await self.order_client.cancel_all_orders(symbol)
                 except Exception as exc:
-                    logger.error(f"Failed to cancel orders for {symbol}: {exc}")
+                    logger.error(
+                        f"Failed to cancel orders for {symbol}: {exc}"
+                    )
 
         self.decision_journal.log_emergency_flatten(
             symbol="ALL",
@@ -925,12 +953,90 @@ class LiveRunnerHandler:
 
 
 # ============================================================
+# Фоновая задача ресинхронизации стаканов
+# ============================================================
+
+async def _resync_loop(
+    rest_client: BinanceFuturesRestClient,
+    handler: LiveRunnerHandler,
+    books: Dict[str, FastOrderBook],
+    check_interval: float = 2.0,
+) -> None:
+    """
+    Фоновая задача: ресинхронизация стаканов при рассинхронизации.
+
+    Проверяет book.requires_resync для каждого стакана.
+    При рассинхронизации запрашивает новый снапшот через REST
+    и применяет его через handler.on_snapshot().
+
+    Это предотвращает ситуацию, когда стакан остаётся в состоянии
+    out_of_sync и инциденты BOOK_OUT_OF_SYNC логируются для каждой
+    последующей дельты.
+    """
+    while True:
+        await asyncio.sleep(check_interval)
+
+        for symbol, book in books.items():
+            if not book.requires_resync:
+                continue
+
+            logger.info(f"[RESYNC] {symbol}: requesting new snapshot")
+
+            try:
+                raw_snapshot = await rest_client.get_depth_snapshot(
+                    symbol=symbol, limit=1000
+                )
+
+                now_ns = time.time_ns()
+
+                # Преобразуем [[price, qty], ...] в список BookLevel
+                bids: List[BookLevel] = []
+                for level in raw_snapshot.get("bids", []):
+                    bids.append(BookLevel(
+                        price=float(level[0]),
+                        quantity=float(level[1]),
+                    ))
+
+                asks: List[BookLevel] = []
+                for level in raw_snapshot.get("asks", []):
+                    asks.append(BookLevel(
+                        price=float(level[0]),
+                        quantity=float(level[1]),
+                    ))
+
+                snapshot = BookSnapshotEvent(
+                    ts_exchange_ns=now_ns,
+                    ts_local_ns=now_ns,
+                    symbol=symbol,
+                    bids=bids,
+                    asks=asks,
+                    last_update_id=int(raw_snapshot.get("lastUpdateId", 0)),
+                )
+
+                await handler.on_snapshot(snapshot)
+
+                logger.info(
+                    f"[RESYNC] {symbol}: snapshot applied, "
+                    f"last_update_id={snapshot.last_update_id}, "
+                    f"bids={len(bids)}, asks={len(asks)}"
+                )
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"[RESYNC] {symbol}: failed: {exc}")
+
+
+# ============================================================
 # Основная функция запуска
 # ============================================================
 
-async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -> None:
+async def run_live_runner(
+    config: AppConfig,
+    mode: str,
+    testnet: bool = False,
+) -> None:
     """Основная функция live runner."""
-
     logger.info(
         "Live runner starting",
         mode=mode,
@@ -963,9 +1069,13 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
                     hours=config.collector.history_hours,
                 )
                 history_klines[symbol] = klines
-                logger.info(f"{symbol}: загружено {len(klines)} свечей истории")
+                logger.info(
+                    f"{symbol}: загружено {len(klines)} свечей истории"
+                )
             except Exception as exc:
-                logger.warning(f"{symbol}: не удалось загрузить историю: {exc}")
+                logger.warning(
+                    f"{symbol}: не удалось загрузить историю: {exc}"
+                )
 
     # ========================================
     # 2. Создаём локальные стаканы
@@ -977,8 +1087,11 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
         tick_size = registry.get_tick_size(symbol)
         if tick_size is None:
             raise ValueError(f"Не найден tick_size для {symbol}")
+
         tick_sizes[symbol.upper()] = tick_size
-        books[symbol.upper()] = FastOrderBook(symbol=symbol, tick_size=tick_size)
+        books[symbol.upper()] = FastOrderBook(
+            symbol=symbol, tick_size=tick_size
+        )
 
     # ========================================
     # 3. Создаём основные менеджеры
@@ -990,7 +1103,9 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
     for symbol, klines in history_klines.items():
         detector = level_manager.get_or_create(symbol)
         level_count = detector.load_from_klines(klines)
-        logger.info(f"{symbol}: инициализировано {level_count} уровней из истории")
+        logger.info(
+            f"{symbol}: инициализировано {level_count} уровней из истории"
+        )
 
     book_analyzer_manager = BookAnalyzerManager(tick_sizes=tick_sizes)
     spoof_manager = SpoofDetectorManager(tick_sizes=tick_sizes)
@@ -1001,17 +1116,23 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
     # 4. Создаём журналы
     # ========================================
     decision_journal = DecisionJournal(
-        config=DecisionJournalConfig(base_dir=config.journal.decision_journal_dir)
+        config=DecisionJournalConfig(
+            base_dir=config.journal.decision_journal_dir
+        )
     )
     await decision_journal.start()
 
     incident_journal = IncidentJournal(
-        config=IncidentJournalConfig(base_dir=config.journal.incident_journal_dir)
+        config=IncidentJournalConfig(
+            base_dir=config.journal.incident_journal_dir
+        )
     )
     await incident_journal.start()
 
     trade_journal = TradeJournal(
-        config=TradeJournalConfig(base_dir=config.journal.trade_journal_dir)
+        config=TradeJournalConfig(
+            base_dir=config.journal.trade_journal_dir
+        )
     )
     await trade_journal.start()
 
@@ -1093,7 +1214,6 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
             paper_executor.bind_book(book)
 
         handler.paper_executor = paper_executor
-
         logger.info("Paper executor initialized")
 
     else:
@@ -1106,7 +1226,9 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
             logger.info("Binance auth created from environment")
         except ValueError as exc:
             logger.error(f"Auth failed: {exc}")
-            logger.info("Set BINANCE_FUTURES_API_KEY and BINANCE_FUTURES_API_SECRET")
+            logger.info(
+                "Set BINANCE_FUTURES_API_KEY and BINANCE_FUTURES_API_SECRET"
+            )
             raise
 
         # Проверяем баланс аккаунта
@@ -1120,10 +1242,13 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
                     open_orders = await order_client.query_open_orders(symbol)
                     if open_orders:
                         logger.warning(
-                            f"{symbol}: найдено {len(open_orders)} открытых ордеров",
+                            f"{symbol}: найдено {len(open_orders)} "
+                            f"открытых ордеров",
                         )
                 except Exception as exc:
-                    logger.warning(f"{symbol}: не удалось проверить ордера: {exc}")
+                    logger.warning(
+                        f"{symbol}: не удалось проверить ордера: {exc}"
+                    )
 
         logger.info("Live mode initialized")
 
@@ -1177,11 +1302,25 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
         risk_per_trade=f"{config.risk.risk_per_trade_pct}%",
     )
 
+    # Флаг для finally блока — был ли создан resync_task
+    resync_task: Optional[asyncio.Task] = None
+    resync_rest_client: Optional[BinanceFuturesRestClient] = None
+
     try:
         gateway_task = asyncio.create_task(gateway.run())
 
         if user_stream_ws is not None:
             user_stream_task = asyncio.create_task(user_stream_ws.run())
+
+        # REST клиент для фоновой ресинхронизации (отдельный от основного)
+        resync_rest_client = BinanceFuturesRestClient()
+        await resync_rest_client.__aenter__()
+
+        resync_task = asyncio.create_task(
+            _resync_loop(
+                resync_rest_client, handler, books, check_interval=2.0
+            )
+        )
 
         await stop_event.wait()
 
@@ -1204,11 +1343,30 @@ async def run_live_runner(config: AppConfig, mode: str, testnet: bool = False) -
         pass
 
     finally:
+        # Останавливаем задачу ресинхронизации
+        if resync_task is not None:
+            resync_task.cancel()
+            try:
+                await resync_task
+            except asyncio.CancelledError:
+                pass
+
+        # Закрываем REST клиент ресинхронизации
+        if resync_rest_client is not None:
+            try:
+                await resync_rest_client.__aexit__(None, None, None)
+            except Exception:
+                pass
+
         # Закрываем все позиции
         for symbol, position in list(handler._open_positions.items()):
             book = books.get(symbol)
-            exit_price = book.mid_price if book is not None else position.entry_price
-            handler._close_position(position, exit_price, ExitReason.FORCED_CLOSE)
+            exit_price = (
+                book.mid_price if book is not None else position.entry_price
+            )
+            handler._close_position(
+                position, exit_price, ExitReason.FORCED_CLOSE
+            )
 
         # Flush бары
         for aggregator in handler.tape_aggregators.values():
@@ -1272,7 +1430,6 @@ def main() -> None:
         default="INFO",
         help="Уровень логирования",
     )
-
     args = parser.parse_args()
 
     # Инициализация логирования
@@ -1283,7 +1440,6 @@ def main() -> None:
 
     # Определение режима
     mode = args.mode or config.execution.mode
-
     if mode == "live":
         logger.warning(
             "LIVE MODE: ордера будут отправляться на биржу",
@@ -1291,7 +1447,9 @@ def main() -> None:
         )
 
     try:
-        asyncio.run(run_live_runner(config, mode=mode, testnet=args.testnet))
+        asyncio.run(
+            run_live_runner(config, mode=mode, testnet=args.testnet)
+        )
     except KeyboardInterrupt:
         logger.info("Stopped by user")
 
