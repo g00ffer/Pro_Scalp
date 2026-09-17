@@ -331,7 +331,7 @@ class SymbolMetrics:
             p_prev = prices[i - 1]
             p_cur = prices[i]
             if p_prev > 0 and p_cur > 0:
-                log_returns.append(math.log(p_cur / p_prev))
+                log_returns.append(math.log(p_cur / p_prev) if p_prev > 0 else 0.0)
 
         if len(log_returns) < 2:
             return 0.0

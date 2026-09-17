@@ -373,11 +373,11 @@ class TapeAnalyzer:
             return False, ""
         
         buy_ratio = (
-            metrics.buy_volume_1s / metrics.buy_volume_median_1s
+            metrics.buy_volume_1s / metrics.buy_volume_median_1s if metrics.buy_volume_median_1s > 0 else 0.0
             if metrics.buy_volume_median_1s > 0 else 0.0
         )
         sell_ratio = (
-            metrics.sell_volume_1s / metrics.sell_volume_median_1s
+            metrics.sell_volume_1s / metrics.sell_volume_median_1s if metrics.sell_volume_median_1s > 0 else 0.0
             if metrics.sell_volume_median_1s > 0 else 0.0
         )
         
@@ -404,7 +404,7 @@ class TapeAnalyzer:
             return False
         
         # price_change как процент от цены
-        price_move_pct = abs(metrics.price_change_1s) / metrics.last_price
+        price_move_pct = abs(metrics.price_change_1s) / metrics.last_price if metrics.last_price > 0 else 0.0
         
         # Если объём большой, а движение < 0.05% - это абсорбция
         return price_move_pct < 0.0005

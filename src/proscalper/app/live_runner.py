@@ -601,14 +601,14 @@ class LiveRunnerHandler:
         if risk_per_unit <= 0:
             return
 
-        quantity = risk_amount / risk_per_unit
+        quantity = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
 
         # Проверяем минимальный/максимальный номинал
         notional = quantity * entry_price
         if notional < self.config.risk.min_notional_per_trade:
-            quantity = self.config.risk.min_notional_per_trade / entry_price
+            quantity = self.config.risk.min_notional_per_trade / entry_price if entry_price > 0 else 0.0
         elif notional > self.config.risk.max_notional_per_trade:
-            quantity = self.config.risk.max_notional_per_trade / entry_price
+            quantity = self.config.risk.max_notional_per_trade / entry_price if entry_price > 0 else 0.0
 
         self.decision_journal.log_risk_approved(
             symbol=symbol,
