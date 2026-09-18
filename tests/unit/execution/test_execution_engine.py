@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -12,20 +12,24 @@ from proscalper.execution.position_manager import PositionLifecycle, PositionMan
 
 @dataclass
 class FakeExecutor:
-    next_order_id: str = "order-1"
+    next_order_number: int = 0
     callback: object = None
-    submitted: list[dict] = None
+    submitted: list[dict] = field(default_factory=list)
     cancel_result: bool = True
-
-    def __post_init__(self):
-        self.submitted = [] if self.submitted is None else self.submitted
 
     def set_event_callback(self, callback):
         self.callback = callback
 
+    def _new_order(self, kind, **kwargs):
+        self.submitted.append({"kind": kind, **kwargs})
+        self.next_order_number += 1
+        return f"order-{self.next_order_number}"
+
     def submit_market(self, **kwargs):
-        self.submitted.append(kwargs)
-        return self.next_order_id
+        return self._new_order("market", **kwargs)
+
+    def submit_stop(self, **kwargs):
+        return self._new_order("stop", **kwargs)
 
     def cancel(self, order_id):
         return self.cancel_result
