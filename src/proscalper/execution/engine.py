@@ -15,7 +15,6 @@ from proscalper.execution.protection import ProtectionLifecycle, ProtectionManag
 @dataclass(frozen=True)
 class SubmissionResult:
     """Result of accepting an intent for execution."""
-
     order_id: str
     position_id: str
 
@@ -23,12 +22,7 @@ class SubmissionResult:
 class ExecutionEngine:
     """Own canonical order lifecycle and enforce position protection."""
 
-    def __init__(
-        self,
-        executor: OrderExecutor,
-        position_manager: PositionManager,
-        protection_manager: ProtectionManager | None = None,
-    ) -> None:
+    def __init__(self, executor: OrderExecutor, position_manager: PositionManager, protection_manager: ProtectionManager | None = None) -> None:
         self.executor = executor
         self.positions = position_manager
         self.protection = protection_manager or ProtectionManager()
@@ -38,33 +32,23 @@ class ExecutionEngine:
         self._intent_closing: dict[str, bool] = {}
         self._order_kind: dict[str, str] = {}
         self._order_to_protection: dict[str, str] = {}
-        self._submitting = True
         self._buffered_events: list[ExecutionEvent] = []
         self.executor.set_event_callback(self._on_execution_event)
-        self._submitting = False
 
     def submit(self, intent: OrderIntent, *, closing: bool = False) -> SubmissionResult:
-        """Register local state, submit to the adapter, then expose the order."""
         self._validate_intent(intent)
         if intent.intent_id in self._intent_to_order:
             raise ValueError(f"intent already submitted: {intent.intent_id}")
-
         if closing:
             self.positions.mark_exit_pending(intent.position_id)
         else:
             self.positions.create_pending(intent)
-
         try:
             order_id = self.executor.submit_market(
-                intent_id=intent.intent_id,
-                position_id=intent.position_id,
-                symbol=intent.symbol,
-                side=intent.side,
-                quantity=intent.quantity,
-                signal_id=intent.signal_id,
-                entry_type=intent.entry_type,
-                stop_price=intent.stop_price,
-                closing=closing,
+                intent_id=intent.intent_id, position_id=intent.position_id,
+                symbol=intent.symbol, side=intent.side, quantity=intent.quantity,
+                signal_id=intent.signal_id, entry_type=intent.entry_type,
+                stop_price=intent.stop_price, closing=closing,
             )
         except Exception:
             if closing:
@@ -72,28 +56,18 @@ class ExecutionEngine:
             else:
                 self.positions.reject_pending(intent.position_id)
             raise
-
         self._register_order(order_id, intent.intent_id, intent.position_id, intent.quantity, closing, "emergency" if closing and intent.reduce_only else "normal")
         self._flush_buffered_events()
-        return SubmissionResult(order_id=order_id, position_id=intent.position_id)
+        return SubmissionResult(order_id, intent.position_id)
 
     def cancel(self, order_id: str) -> bool:
         state = self._require_order(order_id)
-        if state.lifecycle in {
-            OrderLifecycle.FILLED,
-            OrderLifecycle.CANCELLED,
-            OrderLifecycle.REJECTED,
-            OrderLifecycle.EXPIRED,
-        }:
+        if state.lifecycle in {OrderLifecycle.FILLED, OrderLifecycle.CANCELLED, OrderLifecycle.REJECTED, OrderLifecycle.EXPIRED}:
             return False
         state.lifecycle = OrderLifecycle.CANCEL_PENDING
         accepted = self.executor.cancel(order_id)
         if not accepted:
-            state.lifecycle = (
-                OrderLifecycle.PARTIALLY_FILLED
-                if state.filled_qty > 0
-                else OrderLifecycle.ACKNOWLEDGED
-            )
+            state.lifecycle = OrderLifecycle.PARTIALLY_FILLED if state.filled_qty > 0 else OrderLifecycle.ACKNOWLEDGED
         return accepted
 
     def order_state(self, order_id: str) -> OrderState:
@@ -109,7 +83,6 @@ class ExecutionEngine:
         if event.order_id not in self._orders:
             self._buffered_events.append(event)
             return
-
         state = self._require_order(event.order_id)
         if state.intent_id != event.intent_id:
             raise ValueError("execution event intent_id mismatch")
@@ -128,6 +101,8 @@ class ExecutionEngine:
                 assert protection_id is not None
                 self.protection.mark_rejected(protection_id)
                 self._emergency_close(event.position_id, protection_id)
+            elif kind == "emergency":
+                self.positions.mark_orphan(event.position_id)
             elif event.closing:
                 self.positions.restore_open(event.position_id)
             else:
@@ -140,6 +115,8 @@ class ExecutionEngine:
                 assert protection_id is not None
                 self.protection.mark_rejected(protection_id)
                 self._emergency_close(event.position_id, protection_id)
+            elif kind == "emergency":
+                self.positions.mark_orphan(event.position_id)
             elif event.closing:
                 self.positions.restore_open(event.position_id)
             elif state.filled_qty == 0:
@@ -148,7 +125,6 @@ class ExecutionEngine:
 
         if event.fill is None:
             raise ValueError(f"{event.lifecycle} execution event requires fill")
-
         state.apply_fill(event.fill)
         if event.lifecycle != state.lifecycle:
             raise ValueError("execution event lifecycle does not match aggregated order state")
@@ -161,7 +137,6 @@ class ExecutionEngine:
             if event.lifecycle == OrderLifecycle.FILLED:
                 self.protection.mark_closed(protection_id)
             elif event.lifecycle == OrderLifecycle.PARTIALLY_FILLED:
-                self.protection.mark_emergency_pending(protection_id, "")
                 self._emergency_close(event.position_id, protection_id, already_closed=event.fill.quantity)
         elif kind == "emergency":
             if event.lifecycle == OrderLifecycle.FILLED:
@@ -174,26 +149,17 @@ class ExecutionEngine:
         if snapshot.stop_price is None or quantity <= 0:
             return
         protection_id = f"protect-{uuid.uuid4().hex}"
-        leg = self.protection.create(
-            event.position_id,
-            quantity,
-            snapshot.stop_price,
-            protection_id,
-        )
-        leg.lifecycle = ProtectionLifecycle.SUBMITTING
+        self.protection.create(event.position_id, quantity, snapshot.stop_price, protection_id)
+        self.protection.mark_submitting(protection_id)
         stop_side = OrderSide.SELL if snapshot.side.value == "LONG" else OrderSide.BUY
         intent_id = f"{protection_id}-intent"
         try:
             order_id = self.executor.submit_stop(
-                intent_id=intent_id,
-                position_id=event.position_id,
-                symbol=snapshot.symbol,
-                side=stop_side,
-                quantity=quantity,
-                signal_id=event.intent_id,
+                intent_id=intent_id, position_id=event.position_id, symbol=snapshot.symbol,
+                side=stop_side, quantity=quantity, signal_id=event.intent_id,
                 stop_price=snapshot.stop_price,
             )
-        except Exception as exc:
+        except Exception:
             self.protection.mark_rejected(protection_id)
             self._emergency_close(event.position_id, protection_id)
             return
@@ -207,55 +173,27 @@ class ExecutionEngine:
         if remaining <= 1e-12:
             self.protection.mark_closed(protection_id)
             return
-        self.protection._require(protection_id).lifecycle = ProtectionLifecycle.EMERGENCY_EXIT_PENDING
+        self.protection.mark_emergency_submitting(protection_id)
         intent_id = f"emergency-{uuid.uuid4().hex}"
         side = OrderSide.SELL if snapshot.side.value == "LONG" else OrderSide.BUY
-        intent = OrderIntent(
-            intent_id=intent_id,
-            signal_id=f"protection-failure:{protection_id}",
-            position_id=position_id,
-            symbol=snapshot.symbol,
-            side=side,
-            quantity=remaining,
-            entry_type=EntryType.MARKET,
-            reduce_only=True,
-        )
         try:
             order_id = self.executor.submit_market(
-                intent_id=intent.intent_id,
-                position_id=intent.position_id,
-                symbol=intent.symbol,
-                side=intent.side,
-                quantity=intent.quantity,
-                signal_id=intent.signal_id,
-                entry_type=intent.entry_type,
-                closing=True,
+                intent_id=intent_id, position_id=position_id, symbol=snapshot.symbol,
+                side=side, quantity=remaining,
+                signal_id=f"protection-failure:{protection_id}",
+                entry_type=EntryType.MARKET, closing=True,
             )
         except Exception:
             self.positions.mark_orphan(position_id)
             return
-        self._register_order(order_id, intent.intent_id, position_id, remaining, True, "emergency", protection_id)
-        self.protection.mark_emergency_pending(protection_id, order_id)
+        self._register_order(order_id, intent_id, position_id, remaining, True, "emergency", protection_id)
+        self.protection.bind_emergency_order(protection_id, order_id)
         self._flush_buffered_events()
 
-    def _register_order(
-        self,
-        order_id: str,
-        intent_id: str,
-        position_id: str,
-        quantity: float,
-        closing: bool,
-        kind: str,
-        protection_id: str | None = None,
-    ) -> None:
+    def _register_order(self, order_id: str, intent_id: str, position_id: str, quantity: float, closing: bool, kind: str, protection_id: str | None = None) -> None:
         if order_id in self._orders:
             raise ValueError(f"executor returned duplicate order_id: {order_id}")
-        self._orders[order_id] = OrderState(
-            order_id=order_id,
-            intent_id=intent_id,
-            lifecycle=OrderLifecycle.ACKNOWLEDGED,
-            requested_qty=quantity,
-        )
+        self._orders[order_id] = OrderState(order_id=order_id, intent_id=intent_id, lifecycle=OrderLifecycle.ACKNOWLEDGED, requested_qty=quantity)
         self._intent_to_order[intent_id] = order_id
         self._order_to_position[order_id] = position_id
         self._intent_closing[intent_id] = closing
@@ -264,10 +202,7 @@ class ExecutionEngine:
             self._order_to_protection[order_id] = protection_id
 
     def _flush_buffered_events(self) -> None:
-        if not self._buffered_events:
-            return
-        pending = self._buffered_events
-        self._buffered_events = []
+        pending, self._buffered_events = self._buffered_events, []
         for event in pending:
             self._on_execution_event(event)
 
