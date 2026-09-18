@@ -5,23 +5,23 @@ from typing import Optional
 
 from proscalper.core.types import EntryType, OrderSide, Symbol
 from proscalper.execution.executor import ExecutionCallback, ExecutionEvent
-from proscalper.execution.order_state import Fill
-from proscalper.execution.paper import PaperExecutor, PaperFillEvent
+from proscalper.execution.order_state import Fill, OrderLifecycle
+from proscalper.execution.paper import PaperExecutor, PaperFillEvent, PaperOrder
 
 
 class PaperOrderExecutor:
-    """Translate canonical execution calls into the existing PaperExecutor.
-
-    The matching/latency/cost model stays in ``execution.paper``. This adapter
-    only supplies the venue-neutral port and normalizes fills for the domain
-    execution pipeline.
-    """
+    """Translate the existing paper simulator into canonical execution events."""
 
     def __init__(self, paper: PaperExecutor) -> None:
         self.paper = paper
         self._metadata: dict[str, tuple[str, str, bool]] = {}
         self._callback: Optional[ExecutionCallback] = None
         self.paper.on_fill(self._handle_fill)
+        # Kept optional so lightweight test doubles and older paper adapters can
+        # still be wrapped while the rejection event contract is introduced.
+        on_reject = getattr(self.paper, "on_reject", None)
+        if on_reject is not None:
+            on_reject(self._handle_reject)
 
     def submit_market(
         self,
@@ -36,7 +36,6 @@ class PaperOrderExecutor:
         stop_price: float | None = None,
         closing: bool = False,
     ) -> str:
-        """Submit a canonical market intent to the paper simulator."""
         if entry_type != EntryType.MARKET:
             raise ValueError(f"unsupported paper entry type: {entry_type}")
         if quantity <= 0:
@@ -65,12 +64,10 @@ class PaperOrderExecutor:
         metadata = self._metadata.get(event.order.order_id)
         if metadata is None or self._callback is None:
             return
-
         intent_id, position_id, closing = metadata
         result = event.fill_result
         if result.filled_qty <= 0:
             return
-
         fill = Fill(
             fill_id=f"{event.order.order_id}:{event.ts_ns}:{result.filled_qty}",
             order_id=event.order.order_id,
@@ -79,12 +76,30 @@ class PaperOrderExecutor:
             fee=result.fees,
             timestamp_ns=event.ts_ns,
         )
-        self._callback(
-            ExecutionEvent(
-                order_id=event.order.order_id,
-                intent_id=intent_id,
-                position_id=position_id,
-                fill=fill,
-                closing=closing,
-            )
+        lifecycle = (
+            OrderLifecycle.FILLED
+            if result.filled_qty >= result.requested_qty - 1e-12
+            else OrderLifecycle.PARTIALLY_FILLED
         )
+        self._callback(ExecutionEvent(
+            order_id=event.order.order_id,
+            intent_id=intent_id,
+            position_id=position_id,
+            lifecycle=lifecycle,
+            fill=fill,
+            closing=closing,
+        ))
+
+    def _handle_reject(self, order: PaperOrder, reason: str) -> None:
+        metadata = self._metadata.get(order.order_id)
+        if metadata is None or self._callback is None:
+            return
+        intent_id, position_id, closing = metadata
+        self._callback(ExecutionEvent(
+            order_id=order.order_id,
+            intent_id=intent_id,
+            position_id=position_id,
+            lifecycle=OrderLifecycle.REJECTED,
+            closing=closing,
+            reject_reason=reason,
+        ))
