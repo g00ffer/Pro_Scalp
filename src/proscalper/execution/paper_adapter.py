@@ -17,8 +17,6 @@ class PaperOrderExecutor:
         self._metadata: dict[str, tuple[str, str, bool]] = {}
         self._callback: Optional[ExecutionCallback] = None
         self.paper.on_fill(self._handle_fill)
-        # Kept optional so lightweight test doubles and older paper adapters can
-        # still be wrapped while the rejection event contract is introduced.
         on_reject = getattr(self.paper, "on_reject", None)
         if on_reject is not None:
             on_reject(self._handle_reject)
@@ -42,7 +40,6 @@ class PaperOrderExecutor:
             raise ValueError("order quantity must be positive")
         if stop_price is not None:
             raise ValueError("stop_price is not supported by submit_market")
-
         order = self.paper.submit_market_order(
             symbol=str(symbol),
             side=side,
@@ -52,6 +49,34 @@ class PaperOrderExecutor:
             reason=f"intent:{intent_id}",
         )
         self._metadata[order.order_id] = (intent_id, position_id, closing)
+        return order.order_id
+
+    def submit_stop(
+        self,
+        *,
+        intent_id: str,
+        position_id: str,
+        symbol: Symbol,
+        side: OrderSide,
+        quantity: float,
+        signal_id: str,
+        stop_price: float,
+    ) -> str:
+        if quantity <= 0:
+            raise ValueError("stop quantity must be positive")
+        if stop_price <= 0:
+            raise ValueError("stop_price must be positive")
+        order = self.paper.submit_stop_order(
+            symbol=str(symbol),
+            side=side,
+            quantity=quantity,
+            stop_price=stop_price,
+            signal_id=signal_id,
+            leg_type="stop",
+            reason=f"protection:{intent_id}",
+        )
+        # A protective stop is a closing order, but has its own intent identity.
+        self._metadata[order.order_id] = (intent_id, position_id, True)
         return order.order_id
 
     def cancel(self, order_id: str) -> bool:
