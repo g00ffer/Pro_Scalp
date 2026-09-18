@@ -25,6 +25,7 @@ class ExecutionEngine:
         self.positions = position_manager
         self._orders: dict[str, OrderState] = {}
         self._intent_to_order: dict[str, str] = {}
+        self._order_to_position: dict[str, str] = {}
         self._intent_closing: dict[str, bool] = {}
         self.executor.set_event_callback(self._on_execution_event)
 
@@ -52,20 +53,23 @@ class ExecutionEngine:
                 closing=closing,
             )
         except Exception:
-            if not closing:
-                self.positions.reject_pending(intent.position_id)
-            else:
+            if closing:
                 self.positions.restore_open(intent.position_id)
+            else:
+                self.positions.reject_pending(intent.position_id)
             raise
 
-        state = OrderState(
+        if order_id in self._orders:
+            raise ValueError(f"executor returned duplicate order_id: {order_id}")
+
+        self._orders[order_id] = OrderState(
             order_id=order_id,
             intent_id=intent.intent_id,
             lifecycle=OrderLifecycle.ACKNOWLEDGED,
             requested_qty=intent.quantity,
         )
-        self._orders[order_id] = state
         self._intent_to_order[intent.intent_id] = order_id
+        self._order_to_position[order_id] = intent.position_id
         self._intent_closing[intent.intent_id] = closing
         return SubmissionResult(order_id=order_id, position_id=intent.position_id)
 
@@ -98,8 +102,10 @@ class ExecutionEngine:
         state = self._require_order(event.order_id)
         if state.intent_id != event.intent_id:
             raise ValueError("execution event intent_id mismatch")
-        if event.position_id not in {self._position_id_for(event.order_id)}:
+        if self._order_to_position.get(event.order_id) != event.position_id:
             raise ValueError("execution event position_id mismatch")
+        if self._intent_closing.get(event.intent_id) != event.closing:
+            raise ValueError("execution event closing flag mismatch")
 
         if event.lifecycle == OrderLifecycle.REJECTED:
             state.lifecycle = OrderLifecycle.REJECTED
@@ -125,15 +131,6 @@ class ExecutionEngine:
         if event.lifecycle != state.lifecycle:
             raise ValueError("execution event lifecycle does not match aggregated order state")
         self.positions.on_fill(event.position_id, event.fill, closing=event.closing)
-
-    def _position_id_for(self, order_id: str) -> str:
-        intent_id = self._require_order(order_id).intent_id
-        # Position ID is intentionally kept in the executor event and validated
-        # against the engine's submission record through this lookup.
-        for position_id in self.positions._positions:
-            if position_id == position_id and self._intent_to_order.get(intent_id) == order_id:
-                return position_id
-        raise KeyError(f"position for order not found: {order_id}")
 
     def _validate_intent(self, intent: OrderIntent) -> None:
         if intent.quantity <= 0:
