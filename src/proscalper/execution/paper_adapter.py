@@ -5,6 +5,7 @@ from typing import Optional
 
 from proscalper.core.types import EntryType, OrderSide, Symbol
 from proscalper.execution.executor import ExecutionCallback, ExecutionEvent
+from proscalper.execution.order_state import Fill
 from proscalper.execution.paper import PaperExecutor, PaperFillEvent
 
 
@@ -40,7 +41,6 @@ class PaperOrderExecutor:
             raise ValueError(f"unsupported paper entry type: {entry_type}")
         if quantity <= 0:
             raise ValueError("order quantity must be positive")
-
         if stop_price is not None:
             raise ValueError("stop_price is not supported by submit_market")
 
@@ -71,7 +71,7 @@ class PaperOrderExecutor:
         if result.filled_qty <= 0:
             return
 
-        fill = __import__("proscalper.execution.order_state", fromlist=["Fill"]).Fill(
+        fill = Fill(
             fill_id=f"{event.order.order_id}:{event.ts_ns}:{result.filled_qty}",
             order_id=event.order.order_id,
             price=result.avg_fill_price,
