@@ -31,6 +31,7 @@ class _Position:
     position_id: str
     symbol: Symbol
     side: PositionSide
+    requested_quantity: float
     lifecycle: PositionLifecycle = PositionLifecycle.ENTRY_PENDING
     quantity: float = 0.0
     entry_price: float = 0.0
@@ -58,6 +59,7 @@ class PositionManager:
             position_id=intent.position_id,
             symbol=intent.symbol,
             side=side,
+            requested_quantity=intent.quantity,
             stop_price=intent.stop_price,
         )
         self._positions[position.position_id] = position
@@ -91,8 +93,7 @@ class PositionManager:
         )
         position.lifecycle = (
             PositionLifecycle.OPEN
-            if position.quantity >= 1e-12
-            and position.quantity >= self._requested_quantity(position.position_id) - 1e-12
+            if position.quantity >= position.requested_quantity - 1e-12
             else PositionLifecycle.PARTIALLY_FILLED
         )
 
@@ -118,14 +119,8 @@ class PositionManager:
     def state(self, position_id: str) -> PositionLifecycle:
         return self._require(position_id).lifecycle
 
-    def _requested_quantity(self, position_id: str) -> float:
-        # Until the execution engine owns intent registration, the first fill
-        # is sufficient to establish an OPEN position. Partial-fill handling
-        # remains explicit through a PARTIALLY_FILLED state when requested size
-        # is supplied via set_requested_quantity().
-        return getattr(self._require(position_id), "requested_quantity", 0.0) or self._require(position_id).quantity
-
     def set_requested_quantity(self, position_id: str, quantity: float) -> None:
+        """Adjust expected entry size before/during reconciliation."""
         if quantity <= 0:
             raise ValueError("requested quantity must be positive")
         position = self._require(position_id)
