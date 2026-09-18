@@ -109,6 +109,13 @@ class PositionManager:
             raise ValueError("cannot restore a flat position")
         position.lifecycle = PositionLifecycle.OPEN
 
+    def mark_orphan(self, position_id: str) -> None:
+        """Mark a live quantity as unsafe and requiring reconciliation."""
+        position = self._require(position_id)
+        if position.quantity <= 0:
+            raise ValueError("cannot orphan a flat position")
+        position.lifecycle = PositionLifecycle.ORPHAN
+
     def reject_pending(self, position_id: str) -> None:
         position = self._require(position_id)
         if position.quantity > 1e-12:
