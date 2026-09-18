@@ -5,29 +5,27 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from proscalper.core.types import EntryType, OrderSide, Symbol
-from proscalper.execution.order_state import Fill
+from proscalper.execution.order_state import Fill, OrderLifecycle
 
 
 @dataclass(frozen=True)
 class ExecutionEvent:
-    """Normalized execution event emitted by an executor adapter."""
+    """Normalized order lifecycle event emitted by an executor adapter."""
 
     order_id: str
     intent_id: str
     position_id: str
-    fill: Fill
+    lifecycle: OrderLifecycle
+    fill: Fill | None = None
     closing: bool = False
+    reject_reason: str | None = None
 
 
 ExecutionCallback = Callable[[ExecutionEvent], None]
 
 
 class OrderExecutor(Protocol):
-    """Minimal interface shared by paper and exchange executors.
-
-    The execution engine owns intents and lifecycle; adapters only translate
-    intents into venue-specific orders and report normalized fills/rejections.
-    """
+    """Minimal interface shared by paper and exchange executors."""
 
     def submit_market(
         self,
@@ -50,5 +48,5 @@ class OrderExecutor(Protocol):
         ...
 
     def set_event_callback(self, callback: ExecutionCallback) -> None:
-        """Register the normalized fill/rejection event sink."""
+        """Register the normalized lifecycle event sink."""
         ...
