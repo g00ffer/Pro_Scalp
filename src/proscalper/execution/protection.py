@@ -19,8 +19,6 @@ class ProtectionLifecycle(str, Enum):
 
 @dataclass
 class ProtectionLeg:
-    """One stop order protecting one filled entry quantity."""
-
     protection_id: str
     position_id: str
     quantity: float
@@ -48,6 +46,9 @@ class ProtectionManager:
         self._legs[protection_id] = leg
         return leg
 
+    def mark_submitting(self, protection_id: str) -> None:
+        self._require(protection_id).lifecycle = ProtectionLifecycle.SUBMITTING
+
     def bind_order(self, protection_id: str, order_id: str) -> None:
         leg = self._require(protection_id)
         leg.order_id = order_id
@@ -57,10 +58,13 @@ class ProtectionManager:
     def mark_rejected(self, protection_id: str) -> None:
         self._require(protection_id).lifecycle = ProtectionLifecycle.REJECTED
 
-    def mark_emergency_pending(self, protection_id: str, order_id: str) -> None:
+    def mark_emergency_submitting(self, protection_id: str) -> None:
+        self._require(protection_id).lifecycle = ProtectionLifecycle.EMERGENCY_EXIT_PENDING
+
+    def bind_emergency_order(self, protection_id: str, order_id: str) -> None:
         leg = self._require(protection_id)
-        leg.lifecycle = ProtectionLifecycle.EMERGENCY_EXIT_PENDING
         leg.emergency_order_id = order_id
+        leg.lifecycle = ProtectionLifecycle.EMERGENCY_EXIT_PENDING
         self._order_to_leg[order_id] = protection_id
 
     def mark_closed(self, protection_id: str) -> None:
