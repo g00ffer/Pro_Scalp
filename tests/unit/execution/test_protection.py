@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
 
-import pytest
-
 from proscalper.core.types import EntryType, OrderSide, Symbol
 from proscalper.execution.engine import ExecutionEngine
 from proscalper.execution.executor import ExecutionEvent
@@ -134,7 +132,7 @@ def test_protective_stop_fill_closes_position():
     stop = next(x for x in executor.submitted if x["kind"] == "stop")
     protection_id = next(iter(protection._legs))
     executor.emit(ExecutionEvent(
-        order_id=stop["kind"] and f"order-2",
+        order_id="order-2",
         intent_id=f"{protection_id}-intent",
         position_id="position-1",
         lifecycle=OrderLifecycle.FILLED,
