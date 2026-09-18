@@ -36,6 +36,11 @@ class FakeExecutor:
                 order_id=order_id,
                 intent_id=intent_id,
                 position_id=position_id,
+                lifecycle=(
+                    OrderLifecycle.FILLED
+                    if quantity > 0
+                    else OrderLifecycle.REJECTED
+                ),
                 fill=Fill(
                     fill_id=f"fill-{price}-{quantity}",
                     order_id=order_id,
