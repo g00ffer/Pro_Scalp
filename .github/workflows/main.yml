@@ -28,4 +28,6 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        pytest
+        # Запускаем через python -m, чтобы гарантированно добавить текущую папку в sys.path
+        # Флаг --suppress-no-tests-exit-code (если тестов пока нет) уберет ложное падение
+        python -m pytest --suppress-no-tests-exit-code || python -m pytest
