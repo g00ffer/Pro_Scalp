@@ -7,6 +7,7 @@ from proscalper.execution.models import OrderIntent, PositionSnapshot, RiskDecis
 from proscalper.execution.order_state import Fill, OrderLifecycle, OrderState
 from proscalper.execution.paper_adapter import PaperOrderExecutor
 from proscalper.execution.position_manager import PositionLifecycle, PositionManager
+from proscalper.execution.protection import ProtectionLeg, ProtectionLifecycle, ProtectionManager
 
 __all__ = [
     "ExecutionEngine",
@@ -20,6 +21,9 @@ __all__ = [
     "PositionLifecycle",
     "PositionManager",
     "PositionSnapshot",
+    "ProtectionLeg",
+    "ProtectionLifecycle",
+    "ProtectionManager",
     "RiskDecision",
     "Signal",
     "SubmissionResult",
