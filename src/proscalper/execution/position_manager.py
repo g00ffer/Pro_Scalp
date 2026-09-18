@@ -67,11 +67,7 @@ class PositionManager:
         return position.position_id
 
     def on_fill(self, position_id: str, fill: Fill, *, closing: bool = False) -> None:
-        """Apply an execution to a position.
-
-        Entry fills transition PENDING -> PARTIALLY_FILLED/OPEN. Closing fills
-        reduce quantity and eventually transition the position to CLOSED.
-        """
+        """Apply an execution to a position."""
         position = self._require(position_id)
         if closing:
             if fill.quantity > position.quantity + 1e-12:
@@ -102,6 +98,15 @@ class PositionManager:
         if position.quantity <= 0:
             raise ValueError("cannot exit a flat position")
         position.lifecycle = PositionLifecycle.EXIT_PENDING
+
+    def reject_pending(self, position_id: str) -> None:
+        """Remove an entry that was never accepted by the execution venue."""
+        position = self._require(position_id)
+        if position.quantity > 1e-12:
+            raise ValueError("cannot reject a position that has already filled")
+        position.lifecycle = PositionLifecycle.ERROR
+        self._positions.pop(position_id, None)
+        self._by_symbol.pop(position.symbol, None)
 
     def snapshot(self, position_id: str) -> PositionSnapshot:
         position = self._require(position_id)
