@@ -14,7 +14,6 @@ from proscalper.execution.protection import ProtectionLifecycle, ProtectionManag
 
 @dataclass(frozen=True)
 class SubmissionResult:
-    """Result of accepting an intent for execution."""
     order_id: str
     position_id: str
 
@@ -137,7 +136,7 @@ class ExecutionEngine:
             if event.lifecycle == OrderLifecycle.FILLED:
                 self.protection.mark_closed(protection_id)
             elif event.lifecycle == OrderLifecycle.PARTIALLY_FILLED:
-                self._emergency_close(event.position_id, protection_id, already_closed=event.fill.quantity)
+                self._emergency_close(event.position_id, protection_id)
         elif kind == "emergency":
             if event.lifecycle == OrderLifecycle.FILLED:
                 self.protection.mark_closed(protection_id) if protection_id else None
@@ -167,9 +166,9 @@ class ExecutionEngine:
         self.protection.bind_order(protection_id, order_id)
         self._flush_buffered_events()
 
-    def _emergency_close(self, position_id: str, protection_id: str, *, already_closed: float = 0.0) -> None:
+    def _emergency_close(self, position_id: str, protection_id: str) -> None:
         snapshot = self.positions.snapshot(position_id)
-        remaining = snapshot.quantity - already_closed
+        remaining = snapshot.quantity
         if remaining <= 1e-12:
             self.protection.mark_closed(protection_id)
             return
