@@ -15,13 +15,13 @@ class FakeExecutor:
     callback: object = None
     submitted: list[dict] = field(default_factory=list)
     fail_stop: bool = False
-    fail_market: bool = False
+    fail_emergency: bool = False
 
     def set_event_callback(self, callback):
         self.callback = callback
 
     def submit_market(self, **kwargs):
-        if self.fail_market:
+        if kwargs.get("closing") and self.fail_emergency:
             raise RuntimeError("MARKET_REJECT")
         self.submitted.append({"kind": "market", **kwargs})
         self.next_id += 1
@@ -98,7 +98,7 @@ def test_stop_rejection_triggers_emergency_close():
 
 
 def test_emergency_rejection_marks_position_orphan():
-    executor = FakeExecutor(fail_stop=True, fail_market=True)
+    executor = FakeExecutor(fail_stop=True, fail_emergency=True)
     protection = ProtectionManager()
     positions = PositionManager()
     engine = ExecutionEngine(executor, positions, protection)
@@ -132,11 +132,13 @@ def test_protective_stop_fill_closes_position():
     stop = next(x for x in executor.submitted if x["kind"] == "stop")
     protection_id = next(iter(protection._legs))
     executor.emit(ExecutionEvent(
-        order_id="order-2",
+        order_id=next(
+            x["order_id"] for x in executor.submitted if x["kind"] == "stop"
+        ),
         intent_id=f"{protection_id}-intent",
         position_id="position-1",
         lifecycle=OrderLifecycle.FILLED,
-        fill=Fill("fill-stop", "order-2", 98.0, 2.0),
+        fill=Fill("fill-stop", stop["order_id"], 98.0, 2.0),
         closing=True,
     ))
 
