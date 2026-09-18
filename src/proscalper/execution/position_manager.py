@@ -1,8 +1,4 @@
-"""Single owner of local position state.
-
-The manager is deliberately venue-neutral: it consumes fills and exchange
-snapshots rather than assuming that order submission means a position exists.
-"""
+"""Single owner of local position state."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -48,11 +44,12 @@ class PositionManager:
         self._by_symbol: dict[Symbol, str] = {}
 
     def create_pending(self, intent: OrderIntent) -> str:
-        """Register an entry without pretending it has filled."""
         if intent.quantity <= 0:
             raise ValueError("position quantity must be positive")
         if intent.symbol in self._by_symbol:
             raise ValueError(f"position already exists for {intent.symbol}")
+        if intent.position_id in self._positions:
+            raise ValueError(f"position already exists: {intent.position_id}")
 
         side = PositionSide.LONG if intent.side == OrderSide.BUY else PositionSide.SHORT
         position = _Position(
@@ -67,8 +64,10 @@ class PositionManager:
         return position.position_id
 
     def on_fill(self, position_id: str, fill: Fill, *, closing: bool = False) -> None:
-        """Apply an execution to a position."""
         position = self._require(position_id)
+        if fill.quantity <= 0:
+            raise ValueError("fill quantity must be positive")
+
         if closing:
             if fill.quantity > position.quantity + 1e-12:
                 raise ValueError("closing fill exceeds open position quantity")
@@ -81,12 +80,17 @@ class PositionManager:
                 position.lifecycle = PositionLifecycle.EXIT_PENDING
             return
 
+        if position.lifecycle == PositionLifecycle.EXIT_PENDING:
+            raise ValueError("cannot add entry fill while exit is pending")
+
         previous_qty = position.quantity
         position.quantity += fill.quantity
         position.entry_price = (
             ((position.entry_price * previous_qty) + fill.price * fill.quantity)
             / position.quantity
         )
+        if position.quantity > position.requested_quantity + 1e-12:
+            raise ValueError("entry fill exceeds requested position quantity")
         position.lifecycle = (
             PositionLifecycle.OPEN
             if position.quantity >= position.requested_quantity - 1e-12
@@ -99,8 +103,13 @@ class PositionManager:
             raise ValueError("cannot exit a flat position")
         position.lifecycle = PositionLifecycle.EXIT_PENDING
 
+    def restore_open(self, position_id: str) -> None:
+        position = self._require(position_id)
+        if position.quantity <= 0:
+            raise ValueError("cannot restore a flat position")
+        position.lifecycle = PositionLifecycle.OPEN
+
     def reject_pending(self, position_id: str) -> None:
-        """Remove an entry that was never accepted by the execution venue."""
         position = self._require(position_id)
         if position.quantity > 1e-12:
             raise ValueError("cannot reject a position that has already filled")
@@ -125,7 +134,6 @@ class PositionManager:
         return self._require(position_id).lifecycle
 
     def set_requested_quantity(self, position_id: str, quantity: float) -> None:
-        """Adjust expected entry size before/during reconciliation."""
         if quantity <= 0:
             raise ValueError("requested quantity must be positive")
         position = self._require(position_id)
