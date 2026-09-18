@@ -20,19 +20,23 @@ class FakeExecutor:
     def set_event_callback(self, callback):
         self.callback = callback
 
+    def _new_order_id(self) -> str:
+        self.next_id += 1
+        return f"order-{self.next_id}"
+
     def submit_market(self, **kwargs):
         if kwargs.get("closing") and self.fail_emergency:
             raise RuntimeError("MARKET_REJECT")
-        self.submitted.append({"kind": "market", **kwargs})
-        self.next_id += 1
-        return f"order-{self.next_id}"
+        order_id = self._new_order_id()
+        self.submitted.append({"kind": "market", "order_id": order_id, **kwargs})
+        return order_id
 
     def submit_stop(self, **kwargs):
         if self.fail_stop:
             raise RuntimeError("STOP_REJECT")
-        self.submitted.append({"kind": "stop", **kwargs})
-        self.next_id += 1
-        return f"order-{self.next_id}"
+        order_id = self._new_order_id()
+        self.submitted.append({"kind": "stop", "order_id": order_id, **kwargs})
+        return order_id
 
     def cancel(self, order_id):
         return True
@@ -132,9 +136,7 @@ def test_protective_stop_fill_closes_position():
     stop = next(x for x in executor.submitted if x["kind"] == "stop")
     protection_id = next(iter(protection._legs))
     executor.emit(ExecutionEvent(
-        order_id=next(
-            x["order_id"] for x in executor.submitted if x["kind"] == "stop"
-        ),
+        order_id=stop["order_id"],
         intent_id=f"{protection_id}-intent",
         position_id="position-1",
         lifecycle=OrderLifecycle.FILLED,
