@@ -40,7 +40,21 @@ class OrderExecutor(Protocol):
         stop_price: float | None = None,
         closing: bool = False,
     ) -> str:
-        """Submit an order and return the venue order id."""
+        """Submit a market order and return the venue order id."""
+        ...
+
+    def submit_stop(
+        self,
+        *,
+        intent_id: str,
+        position_id: str,
+        symbol: Symbol,
+        side: OrderSide,
+        quantity: float,
+        signal_id: str,
+        stop_price: float,
+    ) -> str:
+        """Submit a protective STOP_MARKET order and return its venue id."""
         ...
 
     def cancel(self, order_id: str) -> bool:
