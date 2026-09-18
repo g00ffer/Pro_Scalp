@@ -29,18 +29,24 @@ class FakeExecutor:
     def set_event_callback(self, callback) -> None:
         self.callback = callback
 
-    def emit_fill(self, *, order_id: str, intent_id: str, position_id: str, price: float, quantity: float, closing: bool = False) -> None:
+    def emit_fill(
+        self,
+        *,
+        order_id: str,
+        intent_id: str,
+        position_id: str,
+        price: float,
+        quantity: float,
+        lifecycle: OrderLifecycle,
+        closing: bool = False,
+    ) -> None:
         assert self.callback is not None
         self.callback(
             ExecutionEvent(
                 order_id=order_id,
                 intent_id=intent_id,
                 position_id=position_id,
-                lifecycle=(
-                    OrderLifecycle.FILLED
-                    if quantity > 0
-                    else OrderLifecycle.REJECTED
-                ),
+                lifecycle=lifecycle,
                 fill=Fill(
                     fill_id=f"fill-{price}-{quantity}",
                     order_id=order_id,
@@ -85,11 +91,25 @@ def test_partial_and_full_fills_update_order_and_position() -> None:
     engine = ExecutionEngine(executor, positions)
     engine.submit(make_intent())
 
-    executor.emit_fill(order_id="order-1", intent_id="intent-1", position_id="position-1", price=100.0, quantity=1.0)
+    executor.emit_fill(
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=100.0,
+        quantity=1.0,
+        lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+    )
     assert engine.order_state("order-1").lifecycle == OrderLifecycle.PARTIALLY_FILLED
     assert positions.state("position-1") == PositionLifecycle.PARTIALLY_FILLED
 
-    executor.emit_fill(order_id="order-1", intent_id="intent-1", position_id="position-1", price=102.0, quantity=1.0)
+    executor.emit_fill(
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=102.0,
+        quantity=1.0,
+        lifecycle=OrderLifecycle.FILLED,
+    )
     state = engine.order_state("order-1")
     assert state.lifecycle == OrderLifecycle.FILLED
     assert state.filled_qty == pytest.approx(2.0)
