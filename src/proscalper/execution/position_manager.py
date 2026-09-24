@@ -318,3 +318,19 @@ class PositionManager:
             return self._positions[position_id]
         except KeyError as exc:
             raise KeyError(f"unknown position_id: {position_id}") from exc
+
+
+class ReconciliationService:
+    """Application-facing reconciliation boundary around PositionManager."""
+
+    def __init__(self, positions: PositionManager) -> None:
+        self.positions = positions
+
+    def reconcile(
+        self,
+        venue_positions: tuple[VenuePositionSnapshot, ...] | list[VenuePositionSnapshot],
+    ) -> ReconciliationResult:
+        return self.positions.reconcile(venue_positions)
+
+    def assert_safe(self) -> None:
+        self.positions.assert_safe()
