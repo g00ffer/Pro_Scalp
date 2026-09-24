@@ -36,6 +36,24 @@ class _Position:
     unrealized_pnl: float = 0.0
 
 
+@dataclass(frozen=True)
+class VenuePositionSnapshot:
+    """Normalized position exposure read from the trading venue."""
+
+    symbol: Symbol
+    side: PositionSide
+    quantity: float
+    entry_price: float
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    restored: tuple[str, ...] = ()
+    unchanged: tuple[str, ...] = ()
+    orphaned: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
 class PositionManager:
     """Owns all local position state, including reconciliation state."""
 
@@ -185,6 +203,95 @@ class PositionManager:
     def mark_reconciliation_error(self, position_id: str) -> None:
         position = self._require(position_id)
         position.lifecycle = PositionLifecycle.ERROR
+
+    def reconcile(
+        self,
+        venue_positions: tuple[VenuePositionSnapshot, ...] | list[VenuePositionSnapshot],
+    ) -> ReconciliationResult:
+        """Reconcile local exposure against the exchange snapshot.
+
+        Exchange quantity/side/entry price are authoritative at this boundary.
+        A local position absent from the venue is marked ORPHAN rather than
+        silently deleted, so the discrepancy remains visible.
+        """
+        venue_by_symbol = {
+            item.symbol: item
+            for item in venue_positions
+            if item.quantity > self.EPSILON
+        }
+        restored: list[str] = []
+        unchanged: list[str] = []
+        orphaned: list[str] = []
+        errors: list[str] = []
+
+        for local in self.snapshots():
+            venue = venue_by_symbol.pop(local.symbol, None)
+            if venue is None:
+                if local.quantity > self.EPSILON:
+                    self.mark_orphan(local.position_id)
+                    orphaned.append(local.position_id)
+                continue
+
+            same = (
+                local.side == venue.side
+                and abs(local.quantity - venue.quantity) <= self.EPSILON
+                and abs(local.entry_price - venue.entry_price) <= self.EPSILON
+            )
+            if same:
+                unchanged.append(local.position_id)
+                continue
+
+            try:
+                self.begin_reconciliation(local.position_id)
+                self.reconcile_open(
+                    position_id=local.position_id,
+                    symbol=venue.symbol,
+                    side=venue.side,
+                    quantity=venue.quantity,
+                    entry_price=venue.entry_price,
+                )
+                restored.append(local.position_id)
+            except ValueError:
+                self.mark_reconciliation_error(local.position_id)
+                errors.append(local.position_id)
+
+        for venue in venue_by_symbol.values():
+            position_id = f"reconciled-{venue.symbol}"
+            try:
+                self.reconcile_open(
+                    position_id=position_id,
+                    symbol=venue.symbol,
+                    side=venue.side,
+                    quantity=venue.quantity,
+                    entry_price=venue.entry_price,
+                )
+                restored.append(position_id)
+            except ValueError:
+                errors.append(position_id)
+
+        return ReconciliationResult(
+            restored=tuple(restored),
+            unchanged=tuple(unchanged),
+            orphaned=tuple(orphaned),
+            errors=tuple(errors),
+        )
+
+    def assert_safe(self) -> None:
+        unsafe = [
+            snapshot.position_id
+            for snapshot in self.snapshots()
+            if self.state(snapshot.position_id)
+            in {
+                PositionLifecycle.ORPHAN,
+                PositionLifecycle.ERROR,
+                PositionLifecycle.RECONCILING,
+            }
+        ]
+        if unsafe:
+            raise RuntimeError(f"unsafe positions require reconciliation: {', '.join(unsafe)}")
+
+    def state(self, position_id: str) -> PositionLifecycle:
+        return self._require(position_id).lifecycle
 
     def set_requested_quantity(self, position_id: str, quantity: float) -> None:
         if quantity <= 0:
