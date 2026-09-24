@@ -31,6 +31,7 @@ __all__ = [
     "ProtectionLifecycle",
     "ProtectionManager",
     "ReconciliationResult",
+    "ReconciliationService",
     "RiskDecision",
     "Signal",
     "SubmissionResult",
