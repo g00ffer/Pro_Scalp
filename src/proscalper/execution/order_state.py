@@ -42,9 +42,19 @@ class OrderState:
     fills: list[Fill] = field(default_factory=list)
     reject_reason: Optional[str] = None
 
-    def apply_fill(self, fill: Fill) -> None:
+    def apply_fill(self, fill: Fill) -> bool:
+        """Apply a fill once; return False for an exact duplicate event."""
         if fill.quantity <= 0:
             raise ValueError("fill quantity must be positive")
+        if fill.order_id != self.order_id:
+            raise ValueError("fill order_id does not match order state")
+
+        for existing in self.fills:
+            if existing.fill_id == fill.fill_id:
+                if existing != fill:
+                    raise ValueError("duplicate fill_id has different payload")
+                return False
+
         if self.filled_qty + fill.quantity > self.requested_qty + 1e-12:
             raise ValueError("fill quantity exceeds requested quantity")
 
@@ -60,3 +70,4 @@ class OrderState:
             if self.filled_qty >= self.requested_qty - 1e-12
             else OrderLifecycle.PARTIALLY_FILLED
         )
+        return True
