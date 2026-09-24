@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from proscalper.core.types import EntryType, OrderSide, Symbol
+from proscalper.core.types import EntryType, OrderSide, PositionSide, Symbol
 from proscalper.execution.engine import ExecutionEngine
 from proscalper.execution.executor import ExecutionEvent
 from proscalper.execution.models import OrderIntent
 from proscalper.execution.order_state import Fill, OrderLifecycle
-from proscalper.execution.position_manager import PositionLifecycle, PositionManager
+from proscalper.execution.position_manager import (
+    PositionLifecycle,
+    PositionManager,
+    VenuePositionSnapshot,
+)
 
 
 class FakeExecutor:
@@ -51,6 +55,7 @@ class FakeExecutor:
         quantity: float,
         lifecycle: OrderLifecycle,
         closing: bool = False,
+        fill_id: str | None = None,
     ) -> None:
         assert self.callback is not None
         self.callback(
@@ -60,7 +65,7 @@ class FakeExecutor:
                 position_id=position_id,
                 lifecycle=lifecycle,
                 fill=Fill(
-                    fill_id=f"fill-{price}-{quantity}",
+                    fill_id=fill_id or f"fill-{price}-{quantity}",
                     order_id=order_id,
                     price=price,
                     quantity=quantity,
@@ -104,15 +109,23 @@ def test_partial_and_full_fills_update_order_and_position() -> None:
     engine.submit(make_intent())
 
     executor.emit_fill(
-        order_id="order-1", intent_id="intent-1", position_id="position-1",
-        price=100.0, quantity=1.0, lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=100.0,
+        quantity=1.0,
+        lifecycle=OrderLifecycle.PARTIALLY_FILLED,
     )
     assert engine.order_state("order-1").lifecycle == OrderLifecycle.PARTIALLY_FILLED
     assert positions.state("position-1") == PositionLifecycle.PARTIALLY_FILLED
 
     executor.emit_fill(
-        order_id="order-1", intent_id="intent-1", position_id="position-1",
-        price=102.0, quantity=1.0, lifecycle=OrderLifecycle.FILLED,
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=102.0,
+        quantity=1.0,
+        lifecycle=OrderLifecycle.FILLED,
     )
     state = engine.order_state("order-1")
     assert state.lifecycle == OrderLifecycle.FILLED
@@ -121,6 +134,123 @@ def test_partial_and_full_fills_update_order_and_position() -> None:
     assert positions.state("position-1") == PositionLifecycle.OPEN
     assert engine.position_snapshot("position-1").entry_price == pytest.approx(101.0)
     assert len([x for x in executor.submitted if x["kind"] == "stop"]) == 2
+
+
+def test_duplicate_fill_event_is_ignored() -> None:
+    executor = FakeExecutor()
+    positions = PositionManager()
+    engine = ExecutionEngine(executor, positions)
+    engine.submit(make_intent(quantity=1.0))
+
+    kwargs = dict(
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=100.0,
+        quantity=1.0,
+        lifecycle=OrderLifecycle.FILLED,
+        fill_id="exchange-fill-1",
+    )
+    executor.emit_fill(**kwargs)
+    executor.emit_fill(**kwargs)
+
+    assert engine.order_state("order-1").filled_qty == pytest.approx(1.0)
+    assert len(engine.order_state("order-1").fills) == 1
+    assert positions.snapshot("position-1").quantity == pytest.approx(1.0)
+
+
+def test_new_order_event_does_not_require_fill() -> None:
+    executor = FakeExecutor()
+    positions = PositionManager()
+    engine = ExecutionEngine(executor, positions)
+    engine.submit(make_intent())
+
+    executor.callback(
+        ExecutionEvent(
+            order_id="order-1",
+            intent_id="intent-1",
+            position_id="position-1",
+            lifecycle=OrderLifecycle.NEW,
+        )
+    )
+
+    assert engine.order_state("order-1").lifecycle == OrderLifecycle.ACKNOWLEDGED
+
+
+def test_reconciliation_restores_exchange_as_authority() -> None:
+    executor = FakeExecutor()
+    positions = PositionManager()
+    engine = ExecutionEngine(executor, positions)
+    engine.submit(make_intent())
+    executor.emit_fill(
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=100.0,
+        quantity=1.0,
+        lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+    )
+
+    result = engine.reconcile(
+        [
+            VenuePositionSnapshot(
+                symbol=Symbol("BTCUSDT"),
+                side=PositionSide.LONG,
+                quantity=1.5,
+                entry_price=101.0,
+            )
+        ]
+    )
+
+    assert result.restored == ("position-1",)
+    snapshot = positions.snapshot("position-1")
+    assert snapshot.quantity == pytest.approx(1.5)
+    assert snapshot.entry_price == pytest.approx(101.0)
+    assert positions.state("position-1") == PositionLifecycle.OPEN
+
+
+def test_reconciliation_marks_missing_local_exposure_orphan() -> None:
+    executor = FakeExecutor()
+    positions = PositionManager()
+    engine = ExecutionEngine(executor, positions)
+    engine.submit(make_intent())
+    executor.emit_fill(
+        order_id="order-1",
+        intent_id="intent-1",
+        position_id="position-1",
+        price=100.0,
+        quantity=2.0,
+        lifecycle=OrderLifecycle.FILLED,
+    )
+
+    result = engine.reconcile([])
+
+    assert result.orphaned == ("position-1",)
+    assert positions.state("position-1") == PositionLifecycle.ORPHAN
+
+
+def test_reconciliation_restores_unknown_exchange_position() -> None:
+    executor = FakeExecutor()
+    positions = PositionManager()
+    engine = ExecutionEngine(executor, positions)
+
+    result = engine.reconcile(
+        [
+            VenuePositionSnapshot(
+                symbol=Symbol("ETHUSDT"),
+                side=PositionSide.SHORT,
+                quantity=3.0,
+                entry_price=2500.0,
+            )
+        ]
+    )
+
+    assert result.restored == ("reconciled-ETHUSDT",)
+    snapshot = positions.snapshot("reconciled-ETHUSDT")
+    assert snapshot.symbol == Symbol("ETHUSDT")
+    assert snapshot.side == PositionSide.SHORT
+    assert snapshot.quantity == pytest.approx(3.0)
+    assert positions.state("reconciled-ETHUSDT") == PositionLifecycle.OPEN
 
 
 def test_submission_failure_does_not_leave_pending_position() -> None:
