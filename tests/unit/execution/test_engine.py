@@ -13,14 +13,26 @@ from proscalper.execution.position_manager import PositionLifecycle, PositionMan
 class FakeExecutor:
     def __init__(self) -> None:
         self.callback = None
-        self.next_order_id = "order-1"
+        self.next_order_id = 0
         self.fail = False
         self.cancelled: list[str] = []
+        self.submitted: list[dict] = []
+
+    def _new_order_id(self) -> str:
+        self.next_order_id += 1
+        return f"order-{self.next_order_id}"
 
     def submit_market(self, **kwargs) -> str:
         if self.fail:
             raise RuntimeError("submit failed")
-        return self.next_order_id
+        order_id = self._new_order_id()
+        self.submitted.append({"kind": "market", "order_id": order_id, **kwargs})
+        return order_id
+
+    def submit_stop(self, **kwargs) -> str:
+        order_id = self._new_order_id()
+        self.submitted.append({"kind": "stop", "order_id": order_id, **kwargs})
+        return order_id
 
     def cancel(self, order_id: str) -> bool:
         self.cancelled.append(order_id)
@@ -92,23 +104,15 @@ def test_partial_and_full_fills_update_order_and_position() -> None:
     engine.submit(make_intent())
 
     executor.emit_fill(
-        order_id="order-1",
-        intent_id="intent-1",
-        position_id="position-1",
-        price=100.0,
-        quantity=1.0,
-        lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+        order_id="order-1", intent_id="intent-1", position_id="position-1",
+        price=100.0, quantity=1.0, lifecycle=OrderLifecycle.PARTIALLY_FILLED,
     )
     assert engine.order_state("order-1").lifecycle == OrderLifecycle.PARTIALLY_FILLED
     assert positions.state("position-1") == PositionLifecycle.PARTIALLY_FILLED
 
     executor.emit_fill(
-        order_id="order-1",
-        intent_id="intent-1",
-        position_id="position-1",
-        price=102.0,
-        quantity=1.0,
-        lifecycle=OrderLifecycle.FILLED,
+        order_id="order-1", intent_id="intent-1", position_id="position-1",
+        price=102.0, quantity=1.0, lifecycle=OrderLifecycle.FILLED,
     )
     state = engine.order_state("order-1")
     assert state.lifecycle == OrderLifecycle.FILLED
@@ -116,6 +120,7 @@ def test_partial_and_full_fills_update_order_and_position() -> None:
     assert state.avg_fill_price == pytest.approx(101.0)
     assert positions.state("position-1") == PositionLifecycle.OPEN
     assert engine.position_snapshot("position-1").entry_price == pytest.approx(101.0)
+    assert len([x for x in executor.submitted if x["kind"] == "stop"]) == 2
 
 
 def test_submission_failure_does_not_leave_pending_position() -> None:
